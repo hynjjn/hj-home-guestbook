@@ -1,0 +1,42 @@
+/* CDN에 의존하지 않고 직접 서빙한다. CDN이 막히면 시스템 폰트로 떨어져서 디자인이 통째로 무너진다.
+   Mona는 SIL OFL 1.1이라 재배포에 문제없다. OFL.txt를 같이 둔다. */
+
+@font-face {
+  font-family: "Mona12 Text KR";
+  src: url("./Mona12TextKR.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Mona12 Text KR";
+  src: url("./Mona12TextKR-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Mona12";
+  src: url("./Mona12.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Mona12";
+  src: url("./Mona12-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Mona12 Color Emoji";
+  src: url("./Mona12ColorEmoji.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

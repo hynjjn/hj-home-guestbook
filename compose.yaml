@@ -1,0 +1,21 @@
+services:
+  app:
+    image: ghcr.io/hynjjn/hj-home-guestbook:latest
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      IP_HASH_SALT: ${IP_HASH_SALT:?set IP_HASH_SALT}
+    volumes:
+      # SD 카드가 아니라 USB SSD 위의 경로를 잡는다
+      - ${DATA_DIR:-./data}:/data
+    # host에 포트를 열지 않는다. cloudflared가 같은 network에서 app:8000으로 붙는다
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
+    depends_on:
+      - app

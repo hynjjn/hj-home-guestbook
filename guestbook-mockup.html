@@ -1,0 +1,767 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>우리 집 방명록</title>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/MonadABXY/mona-font/web/mona.css">
+
+<style>
+  :root {
+    --sky:        #9fd3e8;
+    --sky-deep:   #7cbfd9;
+    --card:       #ffffff;
+    --ink:        #333333;
+    --ink-soft:   #7a7a7a;
+    --line:       #333333;
+    --reply:      #fff6c9;
+    --reply-line: #e0c96a;
+    --pink:       #ff6b9d;
+
+    /* Mona12는 12px 픽셀 글꼴이라 크기는 12의 배수(12 / 24 / 36)만 씁니다.
+       Text KR이 없으면 Mona12로 떨어지도록 스택을 둡니다. */
+    --font: "Mona12 Text KR", "Mona12", "Mona12 Color Emoji", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body, input, textarea, button {
+    font-family: var(--font);
+    font-style: normal;
+    font-synthesis: none;          /* 합성 이탤릭 금지. 볼드는 진짜 700이 있어서 허용 */
+    -webkit-font-smoothing: none;
+    font-smooth: never;
+
+    /* 한글 자형을 쓰려면 locl을 켜야 합니다 */
+    font-feature-settings: "locl" 1;
+    font-language-override: "KOR ";
+  }
+
+  body {
+    margin: 0;
+    padding: 24px 16px 64px;
+    padding:
+      max(24px, env(safe-area-inset-top))
+      max(16px, env(safe-area-inset-right))
+      max(96px, env(safe-area-inset-bottom))
+      max(16px, env(safe-area-inset-left));
+    background-color: var(--sky);
+    background-image: radial-gradient(rgba(255,255,255,.55) 1.5px, transparent 1.5px);
+    background-size: 14px 14px;
+    color: var(--ink);
+  }
+
+  .wrap { width: 100%; max-width: 480px; margin: 0 auto; }
+
+  /* ---------- header ---------- */
+
+  .head {
+    background: var(--pink);
+    border: 2px solid var(--line);
+    box-shadow: 4px 4px 0 var(--line);
+    padding: 18px 18px 16px;
+    margin-bottom: 26px;
+    color: #fff;
+  }
+  .head h1 {
+    font-size: 24px;          /* 12 × 2 */
+    font-weight: 700;
+    line-height: 1.5;
+    margin: 0 0 8px;
+    text-shadow: 2px 2px 0 rgba(0,0,0,.25);
+  }
+  .head p {
+    font-size: 12px;
+    margin: 0;
+    color: #ffe3ee;
+  }
+  .owner-link {
+    display: block;
+    margin: 22px auto 0;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #5d8ba1;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .owner-link:active { transform: none; box-shadow: none; }
+  .owner-link:focus-visible { outline: 2px solid var(--line); outline-offset: 2px; }
+
+  /* ---------- entry card ---------- */
+
+  .entry {
+    background: var(--card);
+    border: 2px solid var(--line);
+    box-shadow: 4px 4px 0 var(--line);
+    margin-bottom: 20px;
+  }
+
+  .entry-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 2px dashed #dcdcdc;
+  }
+
+  .seq {
+    font-size: 12px;
+    color: #fff;
+    background: var(--sky-deep);
+    border: 1.5px solid var(--line);
+    padding: 3px 5px 2px;
+    flex-shrink: 0;
+  }
+
+  .avatar {
+    width: 24px; height: 24px;
+    border: 1.5px solid var(--line);
+    flex-shrink: 0;
+    display: block;
+    image-rendering: pixelated;
+  }
+
+  .who {
+    font-size: 12px;
+    font-weight: 700;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .when {
+    font-size: 12px;
+    color: var(--ink-soft);
+    flex-shrink: 0;
+  }
+
+  .body {
+    padding: 16px;
+    font-size: 12px;
+    line-height: 20px;        /* 작은 글씨라 줄간격을 넉넉히 */
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .menu-btn {
+    flex-shrink: 0;
+    width: 28px; min-height: 28px;
+    padding: 0;
+    font-size: 12px;
+    color: var(--ink-soft);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    cursor: pointer;
+  }
+  .menu-btn:active { transform: none; box-shadow: none; }
+  .menu-btn[aria-expanded="true"] { color: var(--ink); background: #f0f0f0; }
+
+  .card-foot {
+    display: flex; gap: 8px; justify-content: flex-end; align-items: center;
+    flex-wrap: wrap;
+    padding: 0 12px 12px;
+  }
+  .card-foot .ghost {
+    font-size: 12px; font-weight: normal;
+    color: var(--ink); background: #fff;
+    box-shadow: 2px 2px 0 var(--line);
+    padding: 9px 14px; min-height: 40px;
+  }
+  .card-foot .ghost.danger { color: #d94b4b; }
+
+  .pin-row { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; }
+  .pin-row input {
+    width: 100%; padding: 9px 10px;
+    letter-spacing: 4px; text-align: center;
+  }
+  .pin-msg { width: 100%; font-size: 12px; color: #d94b4b; text-align: right; }
+
+  .edit-area { padding: 0 12px 12px; }
+
+  .photo {
+    display: block;
+    width: calc(100% - 24px);
+    margin: 0 12px 14px;
+    border: 1.5px solid var(--line);
+    background: #f2f2f2;
+  }
+
+  .preview {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 12px;
+    padding: 8px;
+    background: #fafafa;
+    border: 1.5px solid #cfcfcf;
+  }
+  .preview img {
+    width: 56px; height: 56px; object-fit: cover;
+    border: 1.5px solid var(--line); flex-shrink: 0;
+  }
+  .preview span {
+    font-size: 12px; color: var(--ink-soft); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .preview button {
+    width: 32px; min-height: 32px; padding: 0;
+    color: var(--ink); background: transparent;
+    border: 0; box-shadow: none; flex-shrink: 0;
+  }
+  .preview button:active { transform: none; box-shadow: none; }
+
+  /* ---------- owner reply nested in the card ---------- */
+
+  .reply {
+    margin: 0 13px 14px;
+    background: var(--reply);
+    border: 1.5px solid var(--reply-line);
+    padding: 11px 13px 12px;
+    position: relative;
+  }
+  .reply::before {
+    content: "└";
+    position: absolute;
+    left: -11px; top: 8px;
+    font-size: 12px;
+    color: #b9a44a;
+  }
+  .reply-head {
+    font-size: 12px;
+    font-weight: 700;
+    color: #8a7420;
+    margin-bottom: 5px;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .reply-body {
+    font-size: 12px;
+    line-height: 20px;
+    white-space: pre-wrap;
+  }
+
+  /* ---------- write form ---------- */
+
+  .write {
+    background: var(--card);
+    border: 2px solid var(--line);
+    box-shadow: 4px 4px 0 var(--line);
+    padding: 16px 15px 17px;
+    margin-top: 30px;
+  }
+  .write h2 {
+    font-size: 12px;
+    font-weight: normal;
+    color: var(--ink-soft);
+    margin: 0 0 14px;
+  }
+
+  .row { display: flex; gap: 9px; margin-bottom: 12px; }
+  .row > * { min-width: 0; }
+
+  input, textarea {
+    /* 12px 이하면 iOS Safari가 포커스할 때 페이지 전체를 확대하고,
+       블러 후에도 축소되지 않습니다. 16px이 그 기준선입니다. */
+    font-size: 16px;
+    color: var(--ink);
+    background: #fafafa;
+    border: 1.5px solid #cfcfcf;
+    padding: 11px 12px;
+    width: 100%;
+    border-radius: 0;
+    -webkit-appearance: none;
+  }
+  input:focus, textarea:focus {
+    outline: 2.5px solid var(--pink);
+    outline-offset: 1px;
+    background: #fff;
+  }
+  textarea { resize: vertical; min-height: 112px; line-height: 20px; }
+  #name { flex: 1.6; }
+  #pin  { flex: 1; letter-spacing: 4px; text-align: center; }
+
+  .foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 13px;
+  }
+
+  .foot-tools {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+
+  button {
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+    background: var(--pink);
+    border: 2px solid var(--line);
+    box-shadow: 3px 3px 0 var(--line);
+    padding: 13px 24px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  button:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--line); }
+  button:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+
+  .photo-button {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    padding: 0;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+  }
+  .photo-button svg {
+    width: 18px;
+    height: 18px;
+    display: block;
+  }
+  .photo-button:active {
+    transform: none;
+    box-shadow: none;
+    background: #ffe3ee;
+  }
+  .photo-button:focus-visible { outline-color: var(--pink); }
+
+  /* ---------- 더 보기 ---------- */
+
+  .more-wrap { text-align: center; margin: 4px 0 8px; }
+
+  .more-button {
+    width: 100%;
+    color: var(--ink);
+    background: #fff;
+    box-shadow: 4px 4px 0 var(--line);
+    padding: 15px 20px;
+  }
+  .more-button:active { transform: translate(4px, 4px); }
+
+  .list-end {
+    font-size: 12px;
+    color: #5d8ba1;
+    text-align: center;
+    padding: 6px 0 4px;
+  }
+
+  /* ---------- 플로팅 버튼 ---------- */
+
+  .fab {
+    position: fixed;
+    right: max(18px, env(safe-area-inset-right));
+    bottom: max(18px, env(safe-area-inset-bottom));
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 15px 20px;
+    box-shadow: 4px 4px 0 var(--line);
+    transition: opacity .15s, transform .15s;
+  }
+  .fab svg { width: 14px; height: 14px; display: block; }
+  .fab:active { transform: translate(4px, 4px); box-shadow: 0 0 0 var(--line); }
+
+  .fab[hidden] {
+    display: flex;              /* hidden 속성 대신 시각적으로만 감춥니다 */
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    button:active { transform: none; }
+    .fab { transition: none; }
+  }
+
+  @media (max-width: 400px) {
+    .row { flex-direction: column; }
+    #pin { letter-spacing: 2px; text-align: left; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="head">
+    <h1>현진이네 집 방명록</h1>
+    <p>186명이 다녀갔어요</p>
+  </header>
+
+  <main id="list"></main>
+
+  <div class="more-wrap" id="more-wrap" hidden>
+    <button type="button" class="more-button" id="more"></button>
+  </div>
+  <p class="list-end" id="list-end" hidden>여기까지가 처음이에요</p>
+
+  <section class="write" id="write">
+    <h2>한마디 남기기</h2>
+
+    <div class="row">
+      <input id="name" placeholder="이름" maxlength="12">
+      <input id="pin" type="password" placeholder="숫자 4자리 (필수)" inputmode="numeric" maxlength="4" autocomplete="off">
+    </div>
+    <textarea id="content" placeholder="다녀간 흔적을 남겨 주세요"></textarea>
+
+    <div class="preview" id="preview" hidden>
+      <img id="preview-img" alt="">
+      <span id="preview-name"></span>
+      <button type="button" id="preview-drop" aria-label="사진 빼기">✕</button>
+    </div>
+
+    <!-- 실제 구현에서는 여기에 Cloudflare Turnstile 위젯이 들어갑니다 -->
+
+    <div class="foot">
+      <div class="foot-tools">
+        <button type="button" class="photo-button" id="pick-photo" aria-label="사진 첨부" title="사진 첨부">
+          <svg viewBox="0 0 20 20" aria-hidden="true" shape-rendering="crispEdges">
+            <rect x="2" y="3" width="16" height="14" fill="none" stroke="currentColor" stroke-width="2"/>
+            <rect x="5" y="6" width="3" height="3" fill="currentColor"/>
+            <path d="M3 15L7 11L10 14L13 10L17 15" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+        </button>
+        <!-- 비밀글 체크박스가 있던 자리.
+             DB에 is_secret 컬럼과 직렬화 필터는 남아 있으므로
+             되살리려면 이 자리에 체크박스만 다시 넣으면 됩니다.
+             뺀 이유: 관리 화면이 없어서 주인장이 비밀글을 볼 방법이 DB뿐입니다. -->
+        <input type="file" id="photo" accept="image/*" hidden>
+      </div>
+      <button id="submit">남기기</button>
+    </div>
+  </section>
+
+  <button type="button" class="owner-link">주인장 로그인</button>
+
+</div>
+
+<button type="button" class="fab" id="fab">
+  <svg viewBox="0 0 16 16" aria-hidden="true" shape-rendering="crispEdges" fill="currentColor">
+    <rect x="9" y="1" width="4" height="2"/><rect x="11" y="3" width="2" height="2"/>
+    <rect x="7" y="3" width="2" height="2"/><rect x="9" y="5" width="2" height="2"/>
+    <rect x="5" y="5" width="2" height="2"/><rect x="7" y="7" width="2" height="2"/>
+    <rect x="3" y="7" width="2" height="2"/><rect x="5" y="9" width="2" height="2"/>
+    <rect x="2" y="9" width="2" height="2"/><rect x="3" y="11" width="2" height="2"/>
+    <rect x="2" y="11" width="1" height="3"/><rect x="2" y="13" width="3" height="1"/>
+  </svg>
+  남기기
+</button>
+
+<script>
+  /* ---- 이름 → 7x7 좌우대칭 픽셀 아바타 ---- */
+
+  const PALETTE = ["#ff9db4","#8fd4a8","#ffd479","#a6b8f0",
+                   "#f4a3d8","#7fd0d8","#ffb38a","#c3a8e8"];
+
+  function hash(str) {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function avatar(name) {
+    let h = hash(name);
+    const fg = PALETTE[h % PALETTE.length];
+    const N = 7, HALF = 4;
+    let cells = "";
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < HALF; x++) {
+        h = Math.imul(h ^ (y * 31 + x), 16777619) >>> 0;
+        if ((h & 3) < 2) continue;              // 채울지 말지
+        cells += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
+        if (x < HALF - 1)
+          cells += `<rect x="${N - 1 - x}" y="${y}" width="1" height="1"/>`;
+      }
+    }
+    return `<svg class="avatar" viewBox="0 0 ${N} ${N}" role="img"
+              aria-label="${name}님의 아바타" style="background:#f2f2f2">
+              <g fill="${fg}">${cells}</g>
+            </svg>`;
+  }
+
+  /* ---- 표시용 더미 데이터 ---- */
+
+  const entries = [
+    { seq: 184, name: "안영명", date: "2026-07-15",
+      content: "규진아.. 너내꺼야..\n사랑해.... ㅋㅋㅋ\n괜찮냐?? 스탠바이해봐라...",
+      reply: { date: "2026-07-15", content: "자식.. 나았으면 아무것도 못할놈 ㅋㅋ" } },
+
+    { seq: 185, name: "지훈", date: "2026-08-25",
+      content: "화분 물 주는 거 잊지 마세요 ㅋㅋ" },
+
+    { seq: 186, name: "tuna", date: "2026-08-30",
+      content: "집들이 잘 먹고 갑니다. 김치찜 진짜 맛있었어요.\n다음엔 제가 뭐라도 사갈게요!",
+      photo: "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 20' shape-rendering='crispEdges'%3E%3Crect width='32' height='20' fill='%23aedcec'/%3E%3Crect x='0' y='14' width='32' height='6' fill='%238fd4a8'/%3E%3Crect x='24' y='3' width='4' height='4' fill='%23ffd479'/%3E%3Crect x='6' y='8' width='8' height='6' fill='%23ffb38a'/%3E%3Crect x='5' y='6' width='10' height='2' fill='%23d85a30'/%3E%3Crect x='18' y='9' width='6' height='5' fill='%23c3a8e8'/%3E%3C/svg%3E",
+      reply: { date: "2026-09-01", content: "언제든 또 와요. 다음엔 갈비찜 예정" } },
+
+    { seq: 187, name: "은지", date: "2026-09-02",
+      content: "고양이 너무 귀엽다 ㅠㅠ 사진 좀 보내줘" }
+  ];
+
+  /* 더 보기 버튼을 확인하려고 채워 넣은 옛날 글입니다 */
+  const filler = [
+    "집 좋다~ 다음에 또 놀러올게", "잘 먹고 갑니다!", "이사 축하해요 🎉",
+    "화분 잘 키우고 있나 보러 왔음", "삼겹살 최고였다", "오늘 고마웠어",
+    "커피 맛있었어요 ☕️", "다음엔 나도 뭐 만들어 올게", "베란다 뷰가 대박이네",
+    "잘 놀다 갑니다", "집들이 초대 고마워!", "여기 진짜 아늑하다",
+    "고양이가 나 싫어하는 것 같아 ㅠ", "다음에 또 불러줘", "라면 끓여준 거 잘 먹었음",
+    "새 집 축하해요", "이케아 어디서 샀어?", "오늘 진짜 재밌었다",
+    "잘 쉬다 갑니다~", "또 올게요!"
+  ];
+  filler.forEach((text, i) => {
+    entries.push({
+      seq: 183 - i,
+      name: ["민수","지훈","서연","현우","다혜","준영","소라","태현","예린","성민"][i % 10],
+      date: `2026-0${(i % 6) + 1}-${String((i % 27) + 1).padStart(2, "0")}`,
+      content: text
+    });
+  });
+
+  const esc = s => s.replace(/[&<>"]/g, c =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+  function formatDate(value) {
+    const [year, month, day] = value.split("-");
+    return Number(year) === new Date().getFullYear()
+      ? `${month}.${day}`
+      : `${year}.${month}.${day}`;
+  }
+
+  /* ---- 목록 렌더링 + 더 보기 ---- */
+
+  const PAGE = 8;              // 실제 서비스에서는 20 정도가 적당합니다
+  const list     = document.getElementById("list");
+  const moreWrap = document.getElementById("more-wrap");
+  const moreBtn  = document.getElementById("more");
+  const listEnd  = document.getElementById("list-end");
+
+  const feed = [...entries].sort((a, b) => b.seq - a.seq);
+  let shown = PAGE;
+
+  /* 이 기기에서 쓴 글. 실제로는 서버가 준 edit_token을 localStorage에 둡니다 */
+  const mine = new Set([187]);
+
+  /* mockup에서는 1234만 통과합니다. 실제로는 서버가 검증합니다 */
+  const CORRECT_PIN = "1234";
+
+  let ui = { seq: null, mode: null, err: "" };   // mode: menu | pin | edit
+  let pinFor = null;                             // pin 통과 후 할 일: edit | delete
+
+  function card(e) {
+    const open = ui.seq === e.seq;
+    return `
+    <article class="entry">
+      <div class="entry-head">
+        <span class="seq">NO.${e.seq}</span>
+        ${avatar(e.name + e.seq)}
+        <span class="who">${esc(e.name)}</span>
+        <span class="when">${formatDate(e.date)}</span>
+        <button type="button" class="menu-btn" data-act="menu" data-seq="${e.seq}"
+                aria-expanded="${open}" aria-label="이 글 관리">⋮</button>
+      </div>
+
+      ${open && ui.mode === "edit" ? `
+        <div class="edit-area">
+          <textarea id="edit-${e.seq}">${esc(e.content)}</textarea>
+        </div>
+        <div class="card-foot">
+          <button type="button" class="ghost" data-act="close">취소</button>
+          <button type="button" data-act="save" data-seq="${e.seq}">저장</button>
+        </div>` : `
+        <div class="body">${esc(e.content)}</div>`}
+
+      ${e.photo ? `<img class="photo" src="${e.photo}" alt="${esc(e.name)}님이 올린 사진" loading="lazy">` : ""}
+
+      ${e.reply ? `
+        <div class="reply">
+          <div class="reply-head"><span>주인장</span><span>${formatDate(e.reply.date)}</span></div>
+          <div class="reply-body">${esc(e.reply.content)}</div>
+        </div>` : ""}
+
+      ${open && ui.mode === "menu" ? `
+        <div class="card-foot">
+          <button type="button" class="ghost danger" data-act="ask" data-do="delete" data-seq="${e.seq}">삭제</button>
+          <button type="button" class="ghost" data-act="ask" data-do="edit" data-seq="${e.seq}">수정</button>
+          <button type="button" class="ghost" data-act="close">닫기</button>
+        </div>` : ""}
+
+      ${open && ui.mode === "pin" ? `
+        <div class="card-foot">
+          <div class="pin-row">
+            <input id="pin-${e.seq}" type="text" inputmode="numeric" maxlength="4"
+                   autocomplete="off" placeholder="숫자 4자리">
+          </div>
+          <button type="button" class="ghost" data-act="close">취소</button>
+          <button type="button" data-act="verify" data-seq="${e.seq}">확인</button>
+          ${ui.err ? `<p class="pin-msg">${ui.err}</p>` : ""}
+        </div>` : ""}
+    </article>`;
+  }
+
+  function render() {
+    list.innerHTML = feed.slice(0, shown).map(card).join("");
+
+    const left = feed.length - shown;
+    moreWrap.hidden = left <= 0;
+    listEnd.hidden  = left > 0 || feed.length <= PAGE;
+    if (left > 0) moreBtn.textContent = `더 보기 (${left}개 남음)`;
+  }
+
+  list.addEventListener("click", ev => {
+    const btn = ev.target.closest("button");
+    if (!btn) return;
+    const seq = Number(btn.dataset.seq);
+    const e = feed.find(x => x.seq === seq);
+
+    switch (btn.dataset.act) {
+      case "menu":
+        ui = ui.seq === seq && ui.mode ? { seq: null, mode: null, err: "" }
+                                       : { seq, mode: "menu", err: "" };
+        render(); break;
+
+      case "close":
+        ui = { seq: null, mode: null, err: "" }; render(); break;
+
+      case "ask":
+        pinFor = btn.dataset.do;
+        if (mine.has(seq)) return act(seq);          // 이 기기에서 쓴 글이면 PIN 생략
+        ui = { seq, mode: "pin", err: "" };
+        render();
+        document.getElementById(`pin-${seq}`)?.focus();
+        break;
+
+      case "verify": {
+        const v = document.getElementById(`pin-${seq}`).value;
+        if (v !== CORRECT_PIN) {
+          ui = { seq, mode: "pin", err: "숫자가 맞지 않아요" };
+          render();
+          document.getElementById(`pin-${seq}`)?.focus();
+          return;
+        }
+        act(seq); break;
+      }
+
+      case "save":
+        e.content = document.getElementById(`edit-${seq}`).value.trim() || e.content;
+        ui = { seq: null, mode: null, err: "" };
+        render(); break;
+    }
+  });
+
+  function act(seq) {
+    if (pinFor === "delete") {
+      const e = feed.find(x => x.seq === seq);
+      if (confirm(`NO.${seq} 글을 지울까요?\n되돌릴 수 없습니다.`)) {
+        feed.splice(feed.indexOf(e), 1);
+        mine.delete(seq);
+      }
+      ui = { seq: null, mode: null, err: "" };
+      render();
+      return;
+    }
+    ui = { seq, mode: "edit", err: "" };
+    render();
+    document.getElementById(`edit-${seq}`)?.focus();
+  }
+
+  moreBtn.addEventListener("click", () => {
+    const anchor = list.lastElementChild;      // 늘어난 뒤에도 보던 위치를 유지
+    const before = anchor.getBoundingClientRect().top;
+    shown += PAGE;
+    render();
+    const after = list.children[shown - PAGE - 1]?.getBoundingClientRect().top ?? before;
+    window.scrollBy(0, after - before);
+    moreWrap.hidden ? listEnd.focus?.() : moreBtn.focus();
+  });
+
+  render();
+
+  /* ---- 사진 첨부 ---- */
+
+  const MAX_MB = 8;
+  const photoInput = document.getElementById("photo");
+  const preview    = document.getElementById("preview");
+  let photo = null;                    // data URL. 실제로는 File을 그대로 전송합니다
+
+  document.getElementById("pick-photo").addEventListener("click", () => photoInput.click());
+
+  photoInput.addEventListener("change", () => {
+    const file = photoInput.files[0];
+    photoInput.value = "";             // 같은 파일을 다시 골라도 change가 뜨도록
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) { alert("사진만 올릴 수 있어요."); return; }
+    if (file.size > MAX_MB * 1024 * 1024) { alert(`사진은 ${MAX_MB}MB까지예요.`); return; }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      photo = reader.result;
+      document.getElementById("preview-img").src = photo;
+      document.getElementById("preview-name").textContent = file.name;
+      preview.hidden = false;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById("preview-drop").addEventListener("click", () => {
+    photo = null;
+    preview.hidden = true;
+  });
+
+  /* ---- 플로팅 버튼 ---- */
+
+  const fab = document.getElementById("fab");
+  const write = document.getElementById("write");
+
+  fab.addEventListener("click", () => {
+    write.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => document.getElementById("name").focus(), 400);
+  });
+
+  /* 작성 폼이 화면에 들어오면 버튼을 감춥니다 */
+  new IntersectionObserver(
+    ([entry]) => { fab.hidden = entry.isIntersecting; },
+    { threshold: 0.25 }
+  ).observe(write);
+
+  /* ---- 폼 (mockup이라 저장 없이 화면에만 추가) ---- */
+
+  document.getElementById("pin").addEventListener("input", ev => {
+    ev.target.value = ev.target.value.replace(/\D/g, "");
+  });
+
+  document.getElementById("submit").addEventListener("click", () => {
+    const name = document.getElementById("name").value.trim();
+    const pin = document.getElementById("pin").value;
+    const content = document.getElementById("content").value.trim();
+
+    if (!name || !content) { alert("이름과 내용을 채워 주세요."); return; }
+    if (pin.length !== 4)  { alert("숫자 4자리를 넣어 주세요."); return; }
+
+    const seq = Math.max(...entries.map(entry => entry.seq)) + 1;
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
+    feed.unshift({ seq, name, content, date, photo });
+    mine.add(seq);                       // 서버가 준 edit_token을 저장했다고 가정
+    shown += 1;
+    render();
+
+    list.firstElementChild.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    document.getElementById("name").value = "";
+    document.getElementById("pin").value = "";
+    document.getElementById("content").value = "";
+    photo = null;
+    preview.hidden = true;
+  });
+</script>

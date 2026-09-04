@@ -1,0 +1,442 @@
+# 집 방명록 구현 스펙
+
+## 무엇을 만드나
+
+집에 온 손님이 QR을 찍고 한마디 남기는 방명록. 로그인 없이 누구나 쓰고, 누구나 읽는다.
+
+주인장은 관리 화면 없이 **DB를 직접 손본다.** 답글, 삭제, 검열은 전부 SQL로 처리한다.
+
+---
+
+## 안 만드는 것
+
+아래는 검토한 뒤 **의도적으로 뺐다.** 요구사항에서 도출되지 않았거나, 이 규모에 비용이 크다.
+
+| 항목 | 이유 |
+|---|---|
+| 관리자 페이지 | DB 직접 수정으로 충분 |
+| 회원가입, 로그인 | 익명 방명록 |
+| 승인 큐 | 쓰면 바로 보여야 남긴 맛이 난다 |
+| Turnstile | 주소를 아는 사람이 손님뿐. 스팸이 실제로 오면 그때 붙인다 |
+| 앱 레벨 rate limit | Cloudflare rule로 처리 |
+| markdown 렌더링 | plain text. sanitize 문제와 XSS 표면이 통째로 사라진다 |
+| 페이지네이션 UI | API에 `limit`, `before`만 넣어 두고 프론트는 글 100개 넘으면 붙인다 |
+| 이메일, 푸시 알림 | 필요하면 텔레그램 봇으로 나중에 |
+| 비밀글 UI | 볼 화면이 없다. 컬럼과 필터만 남긴다 |
+
+기능 추가 요청이 없는 한 위 목록을 다시 열지 않는다.
+
+---
+
+## 비밀글에 대해
+
+**체크박스는 뺐다. 컬럼과 직렬화 필터는 남긴다.**
+
+뺀 이유는 관리 화면이 없어서 주인장이 비밀글을 볼 방법이 DB뿐이기 때문이다. 손님은 "주인장만 본다"고 믿고 쓰는데 며칠 뒤에나 확인된다. 기능이 약속을 못 지킨다.
+
+`is_secret` 컬럼과 아래 필터는 그대로 둔다. 들어오는 값이 전부 `0`이라 분기는 안 타지만, 나중에 되살릴 때 체크박스만 다시 넣으면 된다.
+
+```python
+if entry.is_secret and not is_owner:
+    base.pop("content", None)
+    base.pop("reply", None)
+    return base
+```
+
+비밀글은 프론트에서 가리는 게 아니라 **서버가 `content` 키 자체를 응답에 담지 않는다.** `null`이나 `"***"`로 채우면, 나중에 누군가 "빈 값이면 원본 채워야지" 하고 고치다가 새는 경로가 생긴다.
+
+---
+
+## 스키마 (SQLite)
+
+```sql
+CREATE TABLE entries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    content         TEXT    NOT NULL,
+
+    pin_hash        TEXT    NOT NULL,   -- bcrypt 또는 argon2
+    edit_token      TEXT    NOT NULL,   -- 발급 시 랜덤 32바이트 hex
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until    TEXT,               -- ISO8601, NULL이면 잠금 없음
+
+    is_secret       INTEGER NOT NULL DEFAULT 0,
+    photo           TEXT,               -- 저장된 파일명. NULL이면 사진 없음
+    owner_reply     TEXT,
+    owner_reply_at  TEXT,
+
+    ip_hash         TEXT,               -- salt + CF-Connecting-IP를 hash
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT,
+    deleted_at      TEXT                -- soft delete. NULL이면 살아 있음
+);
+
+CREATE INDEX idx_entries_feed ON entries (deleted_at, id DESC);
+CREATE UNIQUE INDEX idx_entries_token ON entries (edit_token);
+```
+
+### 컬럼 설계 근거
+
+**`id`를 화면 번호로 그대로 쓴다.** soft delete라 번호가 비지 않는다. 별도 `seq` 컬럼은 불필요.
+
+**`edit_token`.** 글 작성 시 서버가 발급해 응답에 담고, 브라우저가 `localStorage`에 저장한다. 같은 기기에서 수정, 삭제할 때 PIN을 묻지 않기 위한 것.
+
+**`pin_hash`.** 기기를 바꿨을 때 쓰는 복구 수단. 4자리라 반드시 시도 횟수 제한과 함께 간다.
+
+**`deleted_at`.** hard delete 금지. 손님 글을 잘못 지우면 복구 방법이 없다.
+
+**`photo`.** entry당 최대 한 장. 여러 장을 허용하면 갤러리 UI, 순서, lightbox가 따라온다. 방명록에는 한 장이면 충분하다. 원본 파일명은 버리고 서버가 만든 랜덤 파일명만 저장한다.
+
+**`ip_hash`.** 원본 IP 저장 금지. Cloudflare Tunnel 뒤에서는 `request.client.host`가 전부 같은 값이므로 **`CF-Connecting-IP` 헤더**에서 꺼내야 한다.
+
+---
+
+## API
+
+베이스 경로는 `/api`. 응답은 전부 JSON.
+
+### `GET /api/entries`
+
+목록 조회. 인증 불필요.
+
+**Query**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `limit` | int | 20 | 최대 100 |
+| `before` | int | 없음 | 이 id보다 작은 것만. cursor pagination |
+
+**응답**
+
+```json
+{
+  "entries": [
+    {
+      "id": 187,
+      "name": "은지",
+      "content": "고양이 너무 귀엽다 ㅠㅠ",
+      "is_secret": false,
+      "photo": "/media/9f3a2b8c1d4e.webp",
+      "reply": { "content": "다음에 보여줄게", "at": "2026-09-03T10:00:00Z" },
+      "created_at": "2026-09-02T14:32:00Z",
+      "updated_at": null,
+      "mine": false
+    }
+  ],
+  "total": 187,
+  "has_more": true
+}
+```
+
+`deleted_at IS NOT NULL`인 항목은 제외한다.
+
+`mine`은 요청의 `X-Edit-Tokens` 헤더에 담긴 토큰과 일치하면 `true`. 프론트가 이 값으로 수정, 삭제 시 PIN을 물을지 정한다.
+
+**`total`은 삭제분을 제외한 살아 있는 글 수.** 헤더의 "N명이 다녀갔어요"에 쓴다.
+
+### `POST /api/entries`
+
+글 작성. 인증 불필요.
+
+**요청** `multipart/form-data`
+
+| 필드 | 타입 | 필수 |
+|---|---|---|
+| `name` | text | 필수 |
+| `content` | text | 필수 |
+| `pin` | text | 필수 |
+| `photo` | file | 선택 |
+
+사진을 별도 endpoint로 먼저 올리는 2단계 방식은 쓰지 않는다. 고아 파일 정리가 따라붙는다. 한 장뿐이니 한 요청에 같이 보낸다.
+
+**검증**
+
+| 필드 | 규칙 |
+|---|---|
+| `name` | 1~12자, 공백만 있으면 거부 |
+| `content` | 1~1000자 |
+| `pin` | 정확히 4자리 숫자 |
+
+**응답 `201`**
+
+```json
+{ "id": 188, "edit_token": "a3f9..." }
+```
+
+`edit_token`은 **이 응답에서만** 내려간다. 이후 어떤 조회 API도 토큰을 노출하지 않는다.
+
+### `POST /api/entries/{id}/verify`
+
+PIN 검증. `GET`이 아니라 `POST`여야 한다. PIN이 URL에 실리면 Cloudflare 로그, 서버 접근 로그, 브라우저 히스토리에 남는다.
+
+**요청** `{ "pin": "1234" }`
+
+**동작**
+
+1. `locked_until`이 미래면 `423 Locked` 반환. PIN이 맞아도 통과시키지 않는다
+2. hash 비교 실패 시 `failed_attempts += 1`. 5회 도달하면 `locked_until = now + 1시간`, `failed_attempts = 0`으로 리셋한 뒤 `401`
+3. 성공 시 `failed_attempts = 0`, `locked_until = NULL`. 단기 편집 토큰을 반환
+
+**응답 `200`** `{ "edit_token": "임시 토큰", "content": "원문" }`
+
+여기서 주는 토큰은 **10분 만료의 일회성 값**으로 두고, `entries.edit_token`을 그대로 주지 않는다. 영구 토큰이 새면 잠금 장치를 우회하는 열쇠가 된다.
+
+### `PATCH /api/entries/{id}`
+
+내용 수정.
+
+**인증** `X-Edit-Token` 헤더. 영구 토큰 또는 `verify`가 발급한 임시 토큰.
+
+**요청** `{ "content": "고친 내용" }`
+
+`updated_at`을 갱신한다. 프론트는 이 값이 있으면 `(수정됨)`을 표시한다.
+
+### `DELETE /api/entries/{id}`
+
+**인증** 위와 동일.
+
+`deleted_at`만 채운다. 행을 지우지 않는다.
+
+---
+
+## 사진 처리
+
+### 반드시 재인코딩한다
+
+EXIF만 지우는 걸로는 부족하다. **Pillow로 디코딩한 뒤 새 파일로 다시 인코딩한다.** 이 한 단계가 세 가지를 동시에 해결한다.
+
+1. **EXIF 제거.** 손님이 집에서 찍은 사진에는 GPS 좌표가 들어 있다. 그대로 올리면 집 주소가 공개된다. 봇도 악의도 필요 없고 그냥 기본 동작이 그렇다
+2. **확장자 위조 검증.** 디코딩이 실패하면 이미지가 아니다. 매직 넘버를 직접 검사할 필요가 없다
+3. **악성 파일 무력화.** 이미지로 위장한 polyglot 파일이 원본 그대로 남지 않는다
+
+```python
+from PIL import Image
+import io, secrets
+
+MAX_BYTES = 8 * 1024 * 1024
+MAX_EDGE  = 1600
+
+def save_photo(raw: bytes) -> str:
+    if len(raw) > MAX_BYTES:
+        raise ValueError("too large")
+
+    img = Image.open(io.BytesIO(raw))   # 실패하면 이미지가 아니다
+    img.verify()
+    img = Image.open(io.BytesIO(raw))   # verify 후에는 다시 열어야 한다
+
+    img = img.convert("RGB")            # EXIF, 알파, 팔레트 정보가 여기서 사라진다
+    img.thumbnail((MAX_EDGE, MAX_EDGE))
+
+    name = secrets.token_hex(8) + ".webp"
+    img.save(MEDIA_DIR / name, "WEBP", quality=82, method=4)
+    return name
+```
+
+`Image.open`은 지연 로딩이라 `verify()` 후 다시 열어야 한다. 이걸 빼먹으면 검증이 무의미해진다.
+
+### 저장과 서빙
+
+파일은 DB 옆 volume에 둔다. R2 같은 외부 저장소는 credential 관리와 서비스가 하나 더 늘어서, 사진 몇 장 쌓일 방명록에는 과하다.
+
+```
+/data
+├── guestbook.db
+└── media/
+    └── 9f3a2b8c1d4e.webp
+```
+
+`GET /media/{filename}`으로 정적 서빙한다. 파일명이 랜덤 hex라 경로 조작 여지가 없지만, 파일명에 `/`나 `..`가 섞이지 않는지는 한 번 더 확인한다.
+
+### 제한
+
+| 항목 | 값 |
+|---|---|
+| entry당 장수 | 1 |
+| 원본 크기 | 8MB |
+| 저장 해상도 | 긴 변 1600px |
+| 포맷 | WEBP, quality 82 |
+
+재인코딩 후 보통 200KB 안쪽으로 떨어진다. 라즈베리파이 CPU로도 가끔 들어오는 업로드는 부담 없다.
+
+### 삭제
+
+entry를 soft delete할 때 사진 파일은 지우지 않는다. 복구할 때 같이 살아나야 한다. 디스크가 찰 걱정을 할 규모가 아니다.
+
+### 남는 위험
+
+로그인 없는 업로드 경로가 열리는 것은 사실이다. 주소를 아는 사람이 손님뿐이라 확률은 낮지만, 스팸이 실제로 오면 **사진이 붙은 글만 승인 후 공개**로 돌리는 게 다음 수순이다. `approved` 컬럼 하나와 분기 하나면 된다. 지금은 넣지 않는다.
+
+---
+
+## 인증 정리
+
+수정과 삭제로 가는 길은 두 개다.
+
+```
+같은 기기       localStorage의 edit_token → X-Edit-Token 헤더 → 통과
+다른 기기       PIN 4자리 → POST /verify → 임시 토큰 → X-Edit-Token 헤더 → 통과
+```
+
+주인장은 별도 인증 경로가 없다. **DB를 직접 연다.**
+
+### 토큰 비교
+
+문자열 비교에 `==`를 쓰지 않는다. 타이밍 공격 여지가 생긴다.
+
+```python
+import hmac
+hmac.compare_digest(given, stored)
+```
+
+---
+
+## 프론트엔드
+
+`guestbook-mockup.html`이 확정 디자인이다. 마크업, CSS, 아바타 생성 로직을 그대로 옮긴다.
+
+### 픽셀 폰트 제약 (중요)
+
+**Mona12는 12px 비트맵 폰트다.** 크기는 12의 배수만 쓴다.
+
+| 요소 | 크기 |
+|---|---|
+| 본문, 라벨, 버튼, 번호, 날짜 | 12px |
+| 제목 | 24px |
+| 아바타 | 24px |
+| **입력창** | **16px (유일한 예외)** |
+
+입력창 예외의 이유: **iOS Safari는 포커스한 입력의 렌더링 크기가 16px 미만이면 페이지 전체를 확대하고, 포커스가 풀려도 축소하지 않는다.** 손님이 직접 핀치로 줄여야 한다. 실기로만 재현되고 Chrome 기기 시뮬레이션으로는 안 보인다.
+
+`maximum-scale=1`로 막지 않는다. 접근성 지침 위반이고, 12px 화면에서 확대를 막으면 눈이 안 좋은 손님이 못 읽는다.
+
+`line-height`는 정수 픽셀로 준다. 12px 본문에 20px.
+
+볼드는 진짜 700이 있으므로 `font-weight: 700`으로 쓸 수 있다. 이탤릭은 없으므로 `font-synthesis: none`을 유지한다.
+
+한글 자형을 쓰려면 `locl`을 켜야 한다.
+
+```css
+font-feature-settings: "locl" 1;
+font-language-override: "KOR ";
+```
+
+### 폰트 self-host
+
+CDN(`cdn.jsdelivr.net/gh/MonadABXY/mona-font`)에 의존하지 말고 woff2를 직접 서빙한다. CDN이 막히면 폰트가 시스템 기본으로 떨어져서 디자인이 통째로 무너진다. Mona는 SIL OFL 1.1이라 재배포에 문제없다.
+
+### 화면 구성
+
+- 목록은 최신순, "더 보기" 버튼으로 20개씩
+- 작성 폼은 목록 아래. 우하단 플로팅 버튼이 폼으로 스크롤시킨다
+- 폼이 화면에 들어오면 플로팅 버튼은 `IntersectionObserver`로 감춘다
+- 카드마다 `⋮` 메뉴 → 수정, 삭제
+- 사진은 본문 아래에 폭 100%로. `loading="lazy"`를 붙인다
+- 폼에서 사진을 고르면 미리보기 썸네일과 빼기 버튼이 뜬다
+- 클라이언트에서 canvas로 미리 축소해 보내면 업로드가 빨라진다. 선택 사항이고, **축소했더라도 서버 재인코딩은 건너뛰지 않는다**
+- 작성 직후 자기 글로 스크롤한다. 남긴 게 보여야 남긴 맛이 난다
+
+---
+
+## 배포
+
+### 구성
+
+```
+Docker Compose
+├── app         FastAPI + 정적 파일 serve. host에 포트를 열지 않는다
+└── cloudflared 같은 network에서 app:8000으로 연결
+```
+
+포트를 열지 않고 `cloudflared`가 outbound로만 나가므로 port forwarding, DDNS, 공인 IP가 전부 불필요하다. 집 IP도 노출되지 않는다.
+
+호스트는 라즈베리파이. DB 파일은 **SD 카드가 아니라 USB SSD 위의 volume**에 둔다.
+
+### SQLite 설정
+
+```python
+PRAGMA journal_mode = WAL;      # 안 켜면 읽는 동안 쓰기가 막힌다
+PRAGMA busy_timeout = 5000;
+```
+
+### 이미지 빌드
+
+Mac이 Apple Silicon이고 파이가 64bit OS면 둘 다 `arm64`라 Mac에서 빌드해 push하면 그대로 돈다. 파이에서 직접 빌드하지 않는다.
+
+배포는 GitHub Actions → GHCR push → 파이에서 `docker compose pull && up -d`.
+
+### 백업
+
+```bash
+sqlite3 /data/guestbook.db ".backup /backup/$(date +%F).db"
+rsync -a /data/media/ /backup/media/
+```
+
+cron으로 하루 한 번. 방명록은 지우면 복구가 안 되는 데이터다. **사진도 백업 대상이다.** DB만 백업하면 복구했을 때 사진이 전부 깨진 링크가 된다.
+
+### 환경변수
+
+| 이름 | 설명 |
+|---|---|
+| `DB_PATH` | `/data/guestbook.db` |
+| `IP_HASH_SALT` | ip_hash용 salt |
+| `MEDIA_DIR` | `/data/media` |
+| `TUNNEL_TOKEN` | cloudflared |
+
+관리자 토큰은 없다. 관리 화면을 만들지 않기 때문이다.
+
+### Cloudflare 대시보드
+
+- rate limit rule: `POST /api/entries`에 IP당 시간 5건
+- 도메인이 필요하다. `trycloudflare.com` 임시 주소는 재시작마다 바뀐다
+
+---
+
+## 구현 순서
+
+1. 스키마 + SQLite 연결 (WAL)
+2. `GET /api/entries`, `POST /api/entries`
+3. `verify`, `PATCH`, `DELETE` + 잠금 로직
+3.5. 사진 업로드와 재인코딩, `/media` 서빙
+4. mockup HTML을 프론트로 이식, 더미 데이터를 API 호출로 교체
+5. 폰트 self-host
+6. Dockerfile 멀티스테이지, compose
+7. 파이에 배포, Tunnel 연결
+8. 백업 cron
+
+1~3까지 붙으면 로컬에서 동작하는 방명록이 된다.
+
+---
+
+## 테스트
+
+최소한 이 셋은 걸어 둔다.
+
+```python
+def test_edit_token_never_leaks():
+    """조회 API 어디에도 edit_token이 나오면 안 된다"""
+    r = client.get("/api/entries")
+    assert "edit_token" not in r.text
+
+def test_deleted_entries_hidden():
+    """soft delete된 글은 목록에 없다"""
+
+def test_pin_lockout():
+    """5회 실패 후에는 올바른 PIN도 423"""
+
+def test_photo_exif_stripped():
+    """GPS가 박힌 사진을 올린 뒤 저장된 파일에 EXIF가 없어야 한다"""
+
+def test_photo_rejects_non_image():
+    """.jpg로 위장한 텍스트 파일은 400"""
+```
+
+비밀글을 되살린다면 하나 더.
+
+```python
+def test_secret_content_never_leaks():
+    r = client.get("/api/entries")
+    for e in r.json()["entries"]:
+        if e["is_secret"]:
+            assert "content" not in e
+            assert "reply" not in e
+```
