@@ -1,14 +1,3 @@
-# ---------- 프론트 빌드 ----------
-FROM node:24-slim AS web
-
-WORKDIR /web
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-
-COPY frontend/ ./
-# vite.config.ts의 outDir이 ../backend/static이라 여기서만 dist로 돌린다
-RUN npx vite build --outDir dist --emptyOutDir
-
 # ---------- 파이썬 의존성 ----------
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS deps
 
@@ -23,17 +12,15 @@ FROM python:3.14-slim-bookworm
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    DB_PATH=/data/guestbook.db \
-    MEDIA_DIR=/data/media \
-    STATIC_DIR=/app/static
+    PYTHONUNBUFFERED=1
 
 COPY --from=deps /app/.venv /app/.venv
 COPY backend/app ./app
-COPY --from=web /web/dist ./static
 
-RUN useradd --create-home --uid 10001 app && mkdir -p /data && chown -R app /data
+RUN useradd --create-home --uid 10001 app
 USER app
 
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Cloud Run이 PORT를 넣어 준다. exec 형식으로는 치환이 안 되므로 sh를 한 겹 둔다.
+# EXPOSE는 Cloud Run이 보지 않지만 로컬에서 docker run 할 때를 위해 남긴다.
+EXPOSE 8080
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

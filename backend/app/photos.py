@@ -10,8 +10,11 @@ class PhotoError(ValueError):
     pass
 
 
-def save_photo(raw: bytes) -> str:
-    """디코딩 후 새 파일로 재인코딩한다. EXIF 제거, 확장자 위조 검증, polyglot 무력화를 한 번에 처리한다."""
+def encode_photo(raw: bytes) -> tuple[str, bytes]:
+    """디코딩 후 새 파일로 재인코딩한다. EXIF 제거, 확장자 위조 검증, polyglot 무력화를 한 번에 처리한다.
+
+    저장은 하지 않고 (파일명, WEBP 바이트)만 돌려준다. 실제 쓰기는 photos 테이블에서 한다.
+    """
     if len(raw) > config.MAX_PHOTO_BYTES:
         raise PhotoError("too large")
 
@@ -26,7 +29,6 @@ def save_photo(raw: bytes) -> str:
     except Exception as exc:
         raise PhotoError("not an image") from exc
 
-    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    name = secrets.token_hex(8) + ".webp"
-    img.save(config.MEDIA_DIR / name, "WEBP", quality=82, method=4)
-    return name
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", quality=82, method=4)
+    return secrets.token_hex(8) + ".webp", buf.getvalue()

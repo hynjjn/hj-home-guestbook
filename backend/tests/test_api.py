@@ -1,8 +1,12 @@
+import importlib
 import io
+
+import psycopg
+from unittest import mock
 
 from PIL import Image
 
-from app import config
+from app import config, db, security
 
 
 def photo_bytes(*, with_gps=True) -> bytes:
@@ -125,7 +129,7 @@ def test_deleted_entries_hidden(client, make_entry):
 
     with db.cursor() as conn:
         row = conn.execute(
-            "SELECT deleted_at FROM entries WHERE id = ?", (made["id"],)
+            "SELECT deleted_at FROM entries WHERE id = %s", (made["id"],)
         ).fetchone()
     assert row["deleted_at"] is not None
 
@@ -160,6 +164,65 @@ def test_verify_returns_temp_token(client, make_entry):
     assert ok.status_code == 200
 
 
+def test_temp_token_survives_process_restart(client, make_entry):
+    """토큰이 process 안에 저장되지 않는다. instance가 갈려도 통해야 한다."""
+    made = make_entry(pin="4321")
+    temp = client.post(
+        f"/api/entries/{made['id']}/verify", json={"pin": "4321"}
+    ).json()["edit_token"]
+
+    # verify를 처리한 instance가 죽고 다른 instance가 PATCH를 받는 상황.
+    # 저장된 상태가 있었다면 여기서 전부 날아간다.
+    importlib.reload(security)
+
+    r = client.patch(
+        f"/api/entries/{made['id']}",
+        json={"content": "다른 instance에서 수정"},
+        headers={"X-Edit-Token": temp},
+    )
+    assert r.status_code == 200
+
+
+def test_temp_token_is_scoped_to_one_entry(client, make_entry):
+    """A글로 받은 토큰이 B글에 통하면 안 된다"""
+    a = make_entry(content="내 글", pin="1111")
+    b = make_entry(content="남의 글", pin="2222")
+
+    temp = client.post(f"/api/entries/{a['id']}/verify", json={"pin": "1111"}).json()[
+        "edit_token"
+    ]
+    r = client.patch(
+        f"/api/entries/{b['id']}",
+        json={"content": "남의 글 수정"},
+        headers={"X-Edit-Token": temp},
+    )
+    assert r.status_code == 401
+
+
+def test_temp_token_rejects_tampering(client, make_entry):
+    """서명이 안 맞으면 거부한다. entry_id만 바꿔치기하는 경우 포함"""
+    a = make_entry(pin="1111")
+    b = make_entry(pin="2222")
+    temp = client.post(f"/api/entries/{a['id']}/verify", json={"pin": "1111"}).json()[
+        "edit_token"
+    ]
+    _, exp, sig = temp.split(".")
+
+    forged = f"{b['id']}.{exp}.{sig}"  # id만 갈아끼운다
+    assert not security.verify_temp_token(forged, b["id"])
+    assert not security.verify_temp_token(temp[:-1] + "0", a["id"])  # 서명 훼손
+    assert not security.verify_temp_token("garbage", a["id"])
+
+
+def test_temp_token_expires(client, make_entry):
+    made = make_entry(pin="1111")
+    assert security.verify_temp_token(security.issue_temp_token(made["id"]), made["id"])
+
+    with mock.patch.object(config, "TEMP_TOKEN_TTL_SECONDS", -1):
+        stale = security.issue_temp_token(made["id"])
+    assert not security.verify_temp_token(stale, made["id"])
+
+
 def test_pin_lockout(client, make_entry):
     """5회 실패 후에는 올바른 PIN도 423"""
     made = make_entry(pin="1234")
@@ -181,7 +244,7 @@ def test_failed_attempts_reset_on_success(client, make_entry):
 
     with db.cursor() as conn:
         row = conn.execute(
-            "SELECT failed_attempts, locked_until FROM entries WHERE id = ?", (made["id"],)
+            "SELECT failed_attempts, locked_until FROM entries WHERE id = %s", (made["id"],)
         ).fetchone()
     assert row["failed_attempts"] == 0
     assert row["locked_until"] is None
@@ -191,24 +254,36 @@ def test_failed_attempts_reset_on_success(client, make_entry):
 
 
 def test_photo_exif_stripped(client, make_entry):
-    """GPS가 박힌 사진을 올린 뒤 저장된 파일에 EXIF가 없어야 한다"""
-    made = make_entry(photo=("home.jpg", photo_bytes(), "image/jpeg"))
+    """GPS가 박힌 사진을 올린 뒤 저장된 바이트에 EXIF가 없어야 한다"""
+    make_entry(photo=("home.jpg", photo_bytes(), "image/jpeg"))
 
     entry = client.get("/api/entries").json()["entries"][0]
     assert entry["photo"].startswith("/media/")
+    assert entry["photo"].endswith(".webp")
 
-    saved = config.MEDIA_DIR / entry["photo"].removeprefix("/media/")
-    assert saved.suffix == ".webp"
+    served = client.get(entry["photo"])
+    assert served.headers["content-type"] == "image/webp"
 
-    with Image.open(saved) as img:
+    with Image.open(io.BytesIO(served.content)) as img:
         assert not dict(img.getexif())
         assert max(img.size) <= config.MAX_PHOTO_EDGE
-    del made
 
 
 def test_photo_served(client, make_entry):
     make_entry(photo=("home.jpg", photo_bytes(with_gps=False), "image/jpeg"))
     path = client.get("/api/entries").json()["entries"][0]["photo"]
+    r = client.get(path)
+    assert r.status_code == 200
+    # 사진을 DB에서 꺼내는 이상 브라우저가 매번 다시 받아가면 안 된다.
+    assert "immutable" in r.headers["cache-control"]
+
+
+def test_photo_survives_soft_delete(client, make_entry):
+    """글을 지워도 사진 행은 남는다. 복구할 때 같이 살아나야 한다."""
+    made = make_entry(photo=("home.jpg", photo_bytes(with_gps=False), "image/jpeg"))
+    path = client.get("/api/entries").json()["entries"][0]["photo"]
+
+    client.delete(f"/api/entries/{made['id']}", headers={"X-Edit-Token": made["edit_token"]})
     assert client.get(path).status_code == 200
 
 
@@ -230,8 +305,9 @@ def test_photo_rejects_oversize(client):
     assert r.status_code == 400
 
 
-def test_media_path_traversal(client):
-    assert client.get("/media/..%2Fguestbook.db").status_code in (400, 404)
+def test_media_missing(client):
+    assert client.get("/media/..%2Fguestbook.db").status_code == 404
+    assert client.get("/media/nope.webp").status_code == 404
 
 
 # ---------- 비밀글 ----------
@@ -242,9 +318,33 @@ def test_secret_content_never_leaks(client, make_entry):
     from app import db
 
     with db.cursor() as conn:
-        conn.execute("UPDATE entries SET is_secret = 1 WHERE id = ?", (made["id"],))
+        conn.execute("UPDATE entries SET is_secret = TRUE WHERE id = %s", (made["id"],))
 
     for e in client.get("/api/entries").json()["entries"]:
         if e["is_secret"]:
             assert "content" not in e
             assert "reply" not in e
+
+
+# ---------- connection pool ----------
+
+
+def test_pool_survives_server_side_disconnect(client, make_entry):
+    """서버가 끊어 버린 연결을 pool이 그대로 내주면 안 된다.
+
+    Cloud Run instance가 idle하면 CPU가 얼어서 pool의 정리 작업이 안 돈다.
+    그 사이 Neon pooler는 idle 연결을 끊는다. 깨어나서 첫 요청이 죽은 연결을
+    받으면 그대로 500이 난다. 실제로 배포 직후 이 증상이 나왔다.
+    """
+    make_entry(content="살아남아야 한다")
+
+    with db.cursor() as conn:
+        pid = conn.execute("SELECT pg_backend_pid() AS p").fetchone()["p"]
+
+    # 반납된 연결을 바깥에서 끊는다
+    with psycopg.connect(config.DATABASE_URL, autocommit=True) as killer:
+        killer.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+    r = client.get("/api/entries")
+    assert r.status_code == 200, f"죽은 연결을 내줬다: {r.status_code}"
+    assert r.json()["total"] == 1

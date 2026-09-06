@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://guestbook-417017218350.asia-southeast1.run.app/api/:path*" },
+    { "source": "/media/:path*", "destination": "https://guestbook-417017218350.asia-southeast1.run.app/media/:path*" }
+  ]
+}

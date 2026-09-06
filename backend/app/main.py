@@ -1,9 +1,9 @@
 import re
-import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import (
     Depends,
     FastAPI,
@@ -15,12 +15,10 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, db, security
-from .photos import PhotoError, save_photo
+from .photos import PhotoError, encode_photo
 
 PIN_RE = re.compile(r"^\d{4}$")
 
@@ -28,8 +26,8 @@ PIN_RE = re.compile(r"^\d{4}$")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
-    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     yield
+    db.close()
 
 
 app = FastAPI(title="집 방명록", lifespan=lifespan)
@@ -40,7 +38,7 @@ def get_conn():
         yield conn
 
 
-Conn = Annotated[sqlite3.Connection, Depends(get_conn)]
+Conn = Annotated[psycopg.Connection, Depends(get_conn)]
 
 
 def now_iso() -> str:
@@ -48,13 +46,19 @@ def now_iso() -> str:
 
 
 def client_ip(request: Request) -> str | None:
-    # Cloudflare Tunnel 뒤에서는 request.client.host가 전부 같은 값이다.
-    return request.headers.get("CF-Connecting-IP") or (
-        request.client.host if request.client else None
-    )
+    # Cloud Run 뒤에서는 request.client.host가 load balancer다. X-Forwarded-For의
+    # 맨 앞이 원래 client다. Vercel rewrite를 거쳐 와도 Vercel이 앞에 넣어 준다.
+    #
+    # 다만 client가 X-Forwarded-For를 직접 붙여 보내면 그 값이 맨 앞에 남는다.
+    # 즉 이 값은 위조 가능하다. ip_hash는 대충 누가 여러 번 썼는지 보는 용도라
+    # 그 정도로 충분하다고 보고 넘어간다. 차단 근거로는 쓰지 않는다.
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    return request.client.host if request.client else None
 
 
-def serialize(row: sqlite3.Row, *, mine: bool, is_owner: bool = False) -> dict[str, Any]:
+def serialize(row: dict[str, Any], *, mine: bool, is_owner: bool = False) -> dict[str, Any]:
     base: dict[str, Any] = {
         "id": row["id"],
         "name": row["name"],
@@ -77,22 +81,22 @@ def serialize(row: sqlite3.Row, *, mine: bool, is_owner: bool = False) -> dict[s
     return base
 
 
-def fetch_alive(conn: sqlite3.Connection, entry_id: int) -> sqlite3.Row:
+def fetch_alive(conn: psycopg.Connection, entry_id: int) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT * FROM entries WHERE id = ? AND deleted_at IS NULL", (entry_id,)
+        "SELECT * FROM entries WHERE id = %s AND deleted_at IS NULL", (entry_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(404, "없는 글이에요")
     return row
 
 
-def authorize(row: sqlite3.Row, given: str | None) -> None:
+def authorize(row: dict[str, Any], given: str | None) -> None:
     """영구 토큰 또는 verify가 발급한 임시 토큰이면 통과."""
     if not given:
         raise HTTPException(401, "권한이 없어요")
     if security.token_matches(given, row["edit_token"]):
         return
-    if security.consume_temp_token(given, row["id"]):
+    if security.verify_temp_token(given, row["id"]):
         return
     raise HTTPException(401, "권한이 없어요")
 
@@ -113,9 +117,9 @@ def list_entries(
     sql = "SELECT * FROM entries WHERE deleted_at IS NULL"
     params: list[Any] = []
     if before is not None:
-        sql += " AND id < ?"
+        sql += " AND id < %s"
         params.append(before)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY id DESC LIMIT %s"
     params.append(limit + 1)
 
     rows = conn.execute(sql, params).fetchall()
@@ -158,31 +162,37 @@ async def create_entry(
     if not PIN_RE.fullmatch(pin):
         raise HTTPException(422, "숫자 4자리를 넣어 주세요")
 
-    filename = None
+    filename = data = None
     if photo is not None and photo.filename:
         raw = await photo.read()
         if raw:
             try:
-                filename = save_photo(raw)
+                filename, data = encode_photo(raw)
             except PhotoError:
                 raise HTTPException(400, "사진을 읽을 수 없어요") from None
 
     token = security.new_edit_token()
-    cur = conn.execute(
-        """INSERT INTO entries (name, content, pin_hash, edit_token, photo, ip_hash, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            name,
-            content,
-            security.hash_pin(pin),
-            token,
-            filename,
-            security.hash_ip(client_ip(request)),
-            now_iso(),
-        ),
-    )
+    # 사진과 글은 같이 들어가거나 같이 실패해야 한다. 따로 쓰면 참조되지 않는
+    # photos 행이 남는다.
+    with conn.transaction():
+        if filename is not None:
+            conn.execute("INSERT INTO photos (name, data) VALUES (%s, %s)", (filename, data))
+        row = conn.execute(
+            """INSERT INTO entries (name, content, pin_hash, edit_token, photo, ip_hash, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (
+                name,
+                content,
+                security.hash_pin(pin),
+                token,
+                filename,
+                security.hash_ip(client_ip(request)),
+                now_iso(),
+            ),
+        ).fetchone()
     # edit_token은 이 응답에서만 내려간다.
-    return {"id": cur.lastrowid, "edit_token": token}
+    return {"id": row["id"], "edit_token": token}
 
 
 # ---------- POST /api/entries/{id}/verify ----------
@@ -206,18 +216,18 @@ def verify_pin(entry_id: int, body: VerifyBody, conn: Conn) -> dict[str, str]:
         if attempts >= config.PIN_MAX_ATTEMPTS:
             until = datetime.now(UTC) + timedelta(seconds=config.PIN_LOCK_SECONDS)
             conn.execute(
-                "UPDATE entries SET failed_attempts = 0, locked_until = ? WHERE id = ?",
+                "UPDATE entries SET failed_attempts = 0, locked_until = %s WHERE id = %s",
                 (until.isoformat(), entry_id),
             )
         else:
             conn.execute(
-                "UPDATE entries SET failed_attempts = ? WHERE id = ?",
+                "UPDATE entries SET failed_attempts = %s WHERE id = %s",
                 (attempts, entry_id),
             )
         raise HTTPException(401, "숫자가 맞지 않아요")
 
     conn.execute(
-        "UPDATE entries SET failed_attempts = 0, locked_until = NULL WHERE id = ?",
+        "UPDATE entries SET failed_attempts = 0, locked_until = NULL WHERE id = %s",
         (entry_id,),
     )
     return {"edit_token": security.issue_temp_token(entry_id), "content": row["content"]}
@@ -245,7 +255,7 @@ def update_entry(
         raise HTTPException(422, "내용은 1~1000자로 넣어 주세요")
 
     conn.execute(
-        "UPDATE entries SET content = ?, updated_at = ? WHERE id = ?",
+        "UPDATE entries SET content = %s, updated_at = %s WHERE id = %s",
         (content, now_iso(), entry_id),
     )
     updated = fetch_alive(conn, entry_id)
@@ -262,25 +272,25 @@ def delete_entry(
     authorize(row, x_edit_token)
     # soft delete. 사진 파일은 남긴다. 복구할 때 같이 살아나야 한다.
     conn.execute(
-        "UPDATE entries SET deleted_at = ? WHERE id = ?", (now_iso(), entry_id)
+        "UPDATE entries SET deleted_at = %s WHERE id = %s", (now_iso(), entry_id)
     )
-    security.drop_tokens_for(entry_id)
+    # 임시 토큰을 따로 폐기하지 않는다. 지워진 글은 fetch_alive가 404를 내므로
+    # 살아 있는 토큰을 들고 와도 닿을 곳이 없다.
     return Response(status_code=204)
 
 
-# ---------- 정적 서빙 ----------
+# ---------- 사진 ----------
 
 
 @app.get("/media/{filename}")
-def media(filename: str) -> FileResponse:
-    # 파일명은 서버가 만든 랜덤 hex뿐이지만 경로 조작은 한 번 더 막는다.
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(400, "잘못된 경로예요")
-    path = config.MEDIA_DIR / filename
-    if not path.is_file():
+def media(filename: str, conn: Conn) -> Response:
+    # 파일 경로를 만들지 않고 primary key로 찾는다. 경로 조작이라는 개념 자체가 없다.
+    row = conn.execute("SELECT data FROM photos WHERE name = %s", (filename,)).fetchone()
+    if row is None:
         raise HTTPException(404, "없는 사진이에요")
-    return FileResponse(path)
+    return Response(
+        bytes(row["data"]),
+        media_type="image/webp",
+        headers={"Cache-Control": config.PHOTO_CACHE_CONTROL},
+    )
 
-
-if config.STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="static")

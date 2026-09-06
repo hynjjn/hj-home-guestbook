@@ -4,8 +4,8 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react()],
   build: {
-    // 백엔드가 STATIC_DIR로 서빙한다
-    outDir: "../backend/static",
+    // Vercel이 이 디렉터리를 서빙한다
+    outDir: "dist",
     emptyOutDir: true,
   },
   server: {
