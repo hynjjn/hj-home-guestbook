@@ -297,12 +297,14 @@ def test_photo_rejects_non_image(client):
 
 
 def test_photo_rejects_oversize(client):
+    """너무 큰 것과 못 읽는 것을 구분해서 알려준다"""
     r = client.post(
         "/api/entries",
         data={"name": "은지", "content": "큰 파일", "pin": "1234"},
         files={"photo": ("big.jpg", b"\xff" * (config.MAX_PHOTO_BYTES + 1), "image/jpeg")},
     )
-    assert r.status_code == 400
+    assert r.status_code == 413
+    assert "커요" in r.json()["detail"]
 
 
 def test_media_missing(client):

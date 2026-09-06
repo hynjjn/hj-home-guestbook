@@ -18,7 +18,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from . import config, db, security
-from .photos import PhotoError, encode_photo
+from .photos import PhotoError, PhotoTooLarge, encode_photo
 
 PIN_RE = re.compile(r"^\d{4}$")
 
@@ -168,6 +168,8 @@ async def create_entry(
         if raw:
             try:
                 filename, data = encode_photo(raw)
+            except PhotoTooLarge:
+                raise HTTPException(413, "사진이 너무 커요") from None
             except PhotoError:
                 raise HTTPException(400, "사진을 읽을 수 없어요") from None
 

@@ -19,6 +19,7 @@ export function WriteForm({
   // 미리보기 URL은 파일과 같이 들고 있어야 교체, 해제 시점이 어긋나지 않는다
   const [photo, setPhoto] = useState<{ file: File; url: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [shrinking, setShrinking] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // 남은 URL은 언마운트할 때 정리한다
@@ -31,17 +32,29 @@ export function WriteForm({
     });
   }
 
-  function pick(file: File | undefined) {
+  async function pick(file: File | undefined) {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       alert("사진만 올릴 수 있어요.");
       return;
     }
-    if (file.size > MAX_MB * 1024 * 1024) {
-      alert(`사진은 ${MAX_MB}MB까지예요.`);
-      return;
+
+    // 고른 즉시 줄인다. 요즘 폰 사진은 원본이 8MB를 예사로 넘기는데, 줄이기 전
+    // 크기로 막으면 줄였으면 통과했을 사진까지 걷어낸다. 미리보기도 실제로
+    // 올라갈 파일을 보여줘야 맞다.
+    setShrinking(true);
+    try {
+      const sized = await shrink(file);
+      // 여기까지 와서도 크면 shrink가 실패한 경우다. HEIC처럼 브라우저가 못 여는
+      // 형식이면 서버도 못 읽으니 여기서 끊는 게 낫다.
+      if (sized.size > MAX_MB * 1024 * 1024) {
+        alert(`사진이 너무 커요. ${MAX_MB}MB 아래로 줄여서 올려 주세요.`);
+        return;
+      }
+      replacePhoto({ file: sized, url: URL.createObjectURL(sized) });
+    } finally {
+      setShrinking(false);
     }
-    replacePhoto({ file, url: URL.createObjectURL(file) });
   }
 
   async function submit() {
@@ -59,12 +72,11 @@ export function WriteForm({
 
     setBusy(true);
     try {
-      const sized = photo ? await shrink(photo.file) : null;
       const { id, edit_token } = await createEntry({
         name: trimmedName,
         content: trimmedContent,
         pin,
-        photo: sized,
+        photo: photo?.file ?? null,
       });
       remember(id, edit_token);
 
@@ -128,6 +140,7 @@ export function WriteForm({
             className="photo-button"
             aria-label="사진 첨부"
             title="사진 첨부"
+            disabled={shrinking}
             onClick={() => fileRef.current?.click()}
           >
             <svg viewBox="0 0 20 20" aria-hidden="true" shapeRendering="crispEdges">
@@ -143,13 +156,13 @@ export function WriteForm({
             hidden
             ref={fileRef}
             onChange={(e) => {
-              pick(e.target.files?.[0]);
+              void pick(e.target.files?.[0]);
               e.target.value = ""; // 같은 파일을 다시 골라도 change가 뜨도록
             }}
           />
         </div>
-        <button disabled={busy} onClick={() => void submit()}>
-          {busy ? "남기는 중" : "남기기"}
+        <button disabled={busy || shrinking} onClick={() => void submit()}>
+          {busy ? "남기는 중" : shrinking ? "사진 줄이는 중" : "남기기"}
         </button>
       </div>
     </section>
