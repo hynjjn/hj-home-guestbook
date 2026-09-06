@@ -85,7 +85,7 @@ export default function App() {
     <>
       <div className="wrap">
         <header className="head">
-          <h1>현진이네 집 방명록</h1>
+          <h1>Hyeonjin's Home</h1>
           <p>{total}명이 다녀갔어요</p>
         </header>
 
