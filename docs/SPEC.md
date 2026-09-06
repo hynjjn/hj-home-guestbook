@@ -65,7 +65,7 @@ CREATE TABLE entries (
     owner_reply     TEXT,
     owner_reply_at  TEXT,
 
-    ip_hash         TEXT,               -- salt + CF-Connecting-IP를 hash
+    ip_hash         TEXT,               -- salt + X-Forwarded-For 맨 앞 값을 hash
     created_at      TEXT    NOT NULL,
     updated_at      TEXT,
     deleted_at      TEXT                -- soft delete. NULL이면 살아 있음
@@ -94,7 +94,9 @@ ALTER TABLE photos ALTER COLUMN data SET STORAGE EXTERNAL;
 
 **`photo`.** entry당 최대 한 장. 여러 장을 허용하면 갤러리 UI, 순서, lightbox가 따라온다. 방명록에는 한 장이면 충분하다. 원본 파일명은 버리고 서버가 만든 랜덤 파일명만 저장한다.
 
-**`ip_hash`.** 원본 IP 저장 금지. Cloudflare Tunnel 뒤에서는 `request.client.host`가 전부 같은 값이므로 **`CF-Connecting-IP` 헤더**에서 꺼내야 한다.
+**`ip_hash`.** 원본 IP 저장 금지. Cloud Run 뒤에서는 `request.client.host`가 load balancer이므로 **`X-Forwarded-For`의 맨 앞 값**을 쓴다.
+
+이 값은 client가 헤더를 직접 붙이면 위조된다. 누가 여러 번 썼는지 대충 보는 용도로만 쓰고 차단 근거로는 쓰지 않는다.
 
 ---
 
@@ -269,7 +271,7 @@ def encode_photo(raw: bytes) -> tuple[str, bytes]:
 | 저장 해상도 | 긴 변 1600px |
 | 포맷 | WEBP, quality 82 |
 
-재인코딩 후 보통 200KB 안쪽으로 떨어진다. 라즈베리파이 CPU로도 가끔 들어오는 업로드는 부담 없다.
+재인코딩 후 보통 200KB 안쪽으로 떨어진다. Neon 무료 티어가 0.5GB이므로 사진 수천 장까지는 여유가 있다.
 
 ### 삭제
 
@@ -355,14 +357,17 @@ CDN(`cdn.jsdelivr.net/gh/MonadABXY/mona-font`)에 의존하지 말고 woff2를 �
 ### 구성
 
 ```
-Docker Compose
-├── app         FastAPI + 정적 파일 serve. host에 포트를 열지 않는다
-└── cloudflared 같은 network에서 app:8000으로 연결
+브라우저
+└── Vercel            프론트 정적 파일. /api와 /media는 rewrite로 넘긴다
+    └── Cloud Run     FastAPI. API만 서빙한다
+        └── Neon      Postgres. 사진 바이트도 여기 있다
 ```
 
-포트를 열지 않고 `cloudflared`가 outbound로만 나가므로 port forwarding, DDNS, 공인 IP가 전부 불필요하다. 집 IP도 노출되지 않는다.
+프론트는 Vercel, API는 Cloud Run, DB는 Neon이다. 집에서 호스팅하려면 공인 도메인이 필요해서 접었다.
 
-호스트는 라즈베리파이. DB 파일은 **SD 카드가 아니라 USB SSD 위의 volume**에 둔다.
+Vercel의 rewrite로 `/api`와 `/media`를 Cloud Run에 넘긴다. 브라우저 입장에서는 전부 same-origin이라 **CORS 설정이 아예 없다.** 프론트 코드의 `BASE = "/api"`도 그대로 둔다.
+
+Neon과 Cloud Run은 **같은 region에 둔다.** 요청 하나가 질의를 여러 번 하므로 여기서 어긋나면 왕복 지연이 그대로 쌓인다. 반면 브라우저는 Cloud Run까지 한 번만 가면 된다.
 
 ### Postgres 연결
 
@@ -377,9 +382,9 @@ ConnectionPool(DATABASE_URL, min_size=0, max_size=4,
 
 ### 이미지 빌드
 
-Mac이 Apple Silicon이고 파이가 64bit OS면 둘 다 `arm64`라 Mac에서 빌드해 push하면 그대로 돈다. 파이에서 직접 빌드하지 않는다.
+`gcloud run deploy --source .`면 Cloud Build가 알아서 만든다. 로컬에서 빌드해 올린다면 `--platform linux/amd64`를 붙인다.
 
-배포는 GitHub Actions → GHCR push → 파이에서 `docker compose pull && up -d`.
+**`PORT`를 반드시 읽어야 한다.** Cloud Run이 넣어 주는 값이고 `EXPOSE`는 보지 않는다. 포트를 고정하면 health check가 실패한다. exec 형식 `CMD`로는 환경변수 치환이 안 되므로 `sh -c`를 한 겹 둔다.
 
 ### 백업
 
@@ -393,16 +398,40 @@ cron으로 하루 한 번. 방명록은 지우면 복구가 안 되는 데이터
 
 | 이름 | 설명 |
 |---|---|
-| `DATABASE_URL` | Postgres 접속 문자열 |
+| `DATABASE_URL` | Postgres 접속 문자열. Neon은 pooled endpoint |
 | `IP_HASH_SALT` | ip_hash용 salt |
-| `TUNNEL_TOKEN` | cloudflared |
+| `TOKEN_SECRET` | 임시 토큰 서명용 |
+| `PORT` | Cloud Run이 넣어 준다 |
 
 관리자 토큰은 없다. 관리 화면을 만들지 않기 때문이다.
 
-### Cloudflare 대시보드
+### rate limit
 
-- rate limit rule: `POST /api/entries`에 IP당 시간 5건
-- 도메인이 필요하다. `trycloudflare.com` 임시 주소는 재시작마다 바뀐다
+**지금 없다.** Cloudflare rule로 처리하기로 했던 자리인데 Cloudflare가 빠지면서 같이 비었다.
+Cloud Armor는 load balancer가 있어야 하고, 그러면 무료로 굴러가던 구성이 유료가 된다.
+
+주소를 아는 사람이 손님뿐이라 당장은 둔다. 스팸이 실제로 오면 그때 앱 레벨 제한을 붙이거나
+Vercel 도메인 앞에 Cloudflare를 세운다.
+
+---
+
+## 임시 토큰
+
+`verify`가 PIN 확인 후 내주는 10분짜리 토큰. `entries.edit_token`을 그대로 주지 않기 위한 것이다.
+
+**서버에 저장하지 않고 서명으로만 검증한다.** 형식은 `{entry_id}.{만료 epoch}.{HMAC 서명}`.
+
+process 안의 dict에 담아 두면 Cloud Run에서 깨진다. instance가 여러 개면 `verify`를 받은
+instance와 `PATCH`를 받는 instance가 달라지고, idle하면 instance째로 사라진다. 둘 다 401이 된다.
+
+기준 시각으로 `time.monotonic()`이 아니라 벽시계를 쓴다. monotonic은 process마다 기준점이
+달라서 instance 사이에서 비교가 안 된다.
+
+`TOKEN_SECRET`은 **모든 instance가 같은 값**이어야 한다. 여기서 process마다 랜덤을 만들면
+저장을 없앤 의미가 사라진다.
+
+지워진 글의 토큰은 따로 폐기하지 않는다. soft delete된 글은 `fetch_alive`가 404를 내므로
+살아 있는 토큰을 들고 와도 닿을 곳이 없다.
 
 ---
 

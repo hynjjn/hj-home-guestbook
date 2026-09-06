@@ -1,8 +1,10 @@
+import importlib
 import io
+from unittest import mock
 
 from PIL import Image
 
-from app import config
+from app import config, security
 
 
 def photo_bytes(*, with_gps=True) -> bytes:
@@ -158,6 +160,65 @@ def test_verify_returns_temp_token(client, make_entry):
         headers={"X-Edit-Token": temp},
     )
     assert ok.status_code == 200
+
+
+def test_temp_token_survives_process_restart(client, make_entry):
+    """토큰이 process 안에 저장되지 않는다. instance가 갈려도 통해야 한다."""
+    made = make_entry(pin="4321")
+    temp = client.post(
+        f"/api/entries/{made['id']}/verify", json={"pin": "4321"}
+    ).json()["edit_token"]
+
+    # verify를 처리한 instance가 죽고 다른 instance가 PATCH를 받는 상황.
+    # 저장된 상태가 있었다면 여기서 전부 날아간다.
+    importlib.reload(security)
+
+    r = client.patch(
+        f"/api/entries/{made['id']}",
+        json={"content": "다른 instance에서 수정"},
+        headers={"X-Edit-Token": temp},
+    )
+    assert r.status_code == 200
+
+
+def test_temp_token_is_scoped_to_one_entry(client, make_entry):
+    """A글로 받은 토큰이 B글에 통하면 안 된다"""
+    a = make_entry(content="내 글", pin="1111")
+    b = make_entry(content="남의 글", pin="2222")
+
+    temp = client.post(f"/api/entries/{a['id']}/verify", json={"pin": "1111"}).json()[
+        "edit_token"
+    ]
+    r = client.patch(
+        f"/api/entries/{b['id']}",
+        json={"content": "남의 글 수정"},
+        headers={"X-Edit-Token": temp},
+    )
+    assert r.status_code == 401
+
+
+def test_temp_token_rejects_tampering(client, make_entry):
+    """서명이 안 맞으면 거부한다. entry_id만 바꿔치기하는 경우 포함"""
+    a = make_entry(pin="1111")
+    b = make_entry(pin="2222")
+    temp = client.post(f"/api/entries/{a['id']}/verify", json={"pin": "1111"}).json()[
+        "edit_token"
+    ]
+    _, exp, sig = temp.split(".")
+
+    forged = f"{b['id']}.{exp}.{sig}"  # id만 갈아끼운다
+    assert not security.verify_temp_token(forged, b["id"])
+    assert not security.verify_temp_token(temp[:-1] + "0", a["id"])  # 서명 훼손
+    assert not security.verify_temp_token("garbage", a["id"])
+
+
+def test_temp_token_expires(client, make_entry):
+    made = make_entry(pin="1111")
+    assert security.verify_temp_token(security.issue_temp_token(made["id"]), made["id"])
+
+    with mock.patch.object(config, "TEMP_TOKEN_TTL_SECONDS", -1):
+        stale = security.issue_temp_token(made["id"])
+    assert not security.verify_temp_token(stale, made["id"])
 
 
 def test_pin_lockout(client, make_entry):

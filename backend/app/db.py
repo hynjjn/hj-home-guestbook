@@ -72,7 +72,14 @@ def cursor() -> Iterator[psycopg.Connection]:
 
 
 def init() -> None:
-    with cursor() as conn:
+    """cold start마다 돈다. instance 여러 개가 동시에 떠도 안전해야 한다.
+
+    CREATE TABLE IF NOT EXISTS는 생각만큼 안전하지 않다. 두 connection이 같은
+    순간에 실행하면 하나가 pg_type unique violation으로 터진다. advisory lock으로
+    한 번에 하나만 들어가게 막는다.
+    """
+    with cursor() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('guestbook-schema'))")
         conn.execute(SCHEMA)
         conn.execute(PHOTO_STORAGE)
 

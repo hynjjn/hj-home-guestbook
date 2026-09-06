@@ -7,9 +7,6 @@ import bcrypt
 
 from . import config
 
-# verify가 발급하는 10분짜리 일회성 토큰. entries.edit_token은 절대 그대로 주지 않는다.
-_temp_tokens: dict[str, tuple[int, float]] = {}
-
 
 def hash_pin(pin: str) -> str:
     return bcrypt.hashpw(pin.encode(), bcrypt.gensalt()).decode()
@@ -29,31 +26,43 @@ def hash_ip(ip: str | None) -> str | None:
     return hashlib.sha256((config.IP_HASH_SALT + ip).encode()).hexdigest()
 
 
+# ---------- verify가 발급하는 임시 토큰 ----------
+#
+# 서버에 저장하지 않고 서명만으로 검증한다. instance가 여러 개 뜨고 idle하면
+# 사라지는 환경에서는 process 안의 dict가 답이 될 수 없다. verify를 처리한
+# instance와 PATCH를 처리한 instance가 다르면 그대로 401이 되기 때문이다.
+#
+# 형식은 "{entry_id}.{만료 epoch}.{서명}". monotonic이 아니라 벽시계를 쓰는 이유는
+# monotonic이 process마다 기준점이 달라 instance 사이에서 비교가 안 되기 때문이다.
+
+
+def _sign(payload: str) -> str:
+    return hmac.new(
+        config.TOKEN_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+
 def issue_temp_token(entry_id: int) -> str:
-    _prune()
-    token = secrets.token_hex(32)
-    _temp_tokens[token] = (entry_id, time.monotonic() + config.TEMP_TOKEN_TTL_SECONDS)
-    return token
+    payload = f"{entry_id}.{int(time.time()) + config.TEMP_TOKEN_TTL_SECONDS}"
+    return f"{payload}.{_sign(payload)}"
 
 
-def consume_temp_token(token: str, entry_id: int) -> bool:
-    """유효하면 True. 만료된 항목은 정리한다."""
-    _prune()
-    for candidate, (owner_id, _expires) in _temp_tokens.items():
-        if owner_id == entry_id and hmac.compare_digest(candidate, token):
-            return True
-    return False
+def verify_temp_token(token: str, entry_id: int) -> bool:
+    """서명이 맞고, 이 글에 대해 발급됐고, 아직 안 지났으면 True."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    raw_id, raw_exp, signature = parts
 
-
-def drop_tokens_for(entry_id: int) -> None:
-    for token in [t for t, (owner, _) in _temp_tokens.items() if owner == entry_id]:
-        _temp_tokens.pop(token, None)
-
-
-def _prune() -> None:
-    now = time.monotonic()
-    for token in [t for t, (_, expires) in _temp_tokens.items() if expires <= now]:
-        _temp_tokens.pop(token, None)
+    # 서명을 먼저 본다. 값을 신뢰하기 전에 위조부터 걸러낸다.
+    if not hmac.compare_digest(signature, _sign(f"{raw_id}.{raw_exp}")):
+        return False
+    if raw_id != str(entry_id):
+        return False
+    try:
+        return int(raw_exp) > time.time()
+    except ValueError:
+        return False
 
 
 def token_matches(given: str, stored: str) -> bool:

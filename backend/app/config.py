@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 # Neon은 pooled endpoint(-pooler가 붙은 host)를 쓴다. Cloud Run이 instance를 계속
 # 만들고 버리는 탓에 direct endpoint로 붙으면 connection이 금방 동난다.
@@ -7,8 +6,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://guestbook:devpass@127.0.0
 
 IP_HASH_SALT = os.getenv("IP_HASH_SALT", "dev-salt-change-me")
 
-# 정적 프론트 빌드 결과물. 없으면 API만 서빙한다.
-STATIC_DIR = Path(os.getenv("STATIC_DIR", "./static"))
+# verify가 발급하는 임시 토큰 서명용. instance가 여러 개면 전부 같은 값을 봐야 한다.
+# process마다 랜덤으로 만들면 저장을 없앤 의미가 사라진다.
+TOKEN_SECRET = os.getenv("TOKEN_SECRET", "dev-token-secret-change-me")
 
 MAX_PHOTO_BYTES = 8 * 1024 * 1024
 MAX_PHOTO_EDGE = 1600

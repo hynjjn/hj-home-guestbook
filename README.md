@@ -6,8 +6,8 @@
 ## 구성
 
 ```
-backend/    FastAPI + Postgres. 정적 프론트도 여기서 서빙한다
-frontend/   React + Vite. 빌드 결과가 backend/static으로 들어간다
+backend/    FastAPI + Postgres. API만 서빙한다. Cloud Run에 올라간다
+frontend/   React + Vite. Vercel에 올라간다
 ```
 
 ## 로컬 실행
@@ -15,9 +15,7 @@ frontend/   React + Vite. 빌드 결과가 backend/static으로 들어간다
 Postgres부터 띄운다. 다른 컨테이너와 안 겹치게 5433으로 연다.
 
 ```bash
-docker run -d --name guestbook-pg \
-  -e POSTGRES_USER=guestbook -e POSTGRES_DB=guestbook -e POSTGRES_PASSWORD=devpass \
-  -p 5433:5432 postgres:17-alpine
+docker compose up -d db
 ```
 
 그다음 터미널 두 개를 쓴다. `DATABASE_URL` 기본값이 위 컨테이너를 가리키므로 따로 안 넘겨도 된다.
@@ -33,12 +31,6 @@ npm install
 npm run dev
 ```
 
-한 곳에서 띄우려면 프론트를 빌드한 뒤 API만 실행하면 된다.
-
-```bash
-cd frontend && npm run build     # backend/static에 떨어진다
-cd ../backend && uv run uvicorn app.main:app
-```
 
 ## 테스트
 
@@ -48,23 +40,50 @@ cd backend && uv run pytest
 
 ## 배포
 
+프론트는 Vercel, API는 Cloud Run, DB는 Neon이다. 도메인 없이 `*.vercel.app`과
+`*.run.app`만으로 돌아간다.
+
+### 1. Cloud Run
+
+Neon이 Singapore에 있으므로 region을 맞춘다. 어긋나면 질의마다 왕복 지연을 그대로 문다.
+
 ```bash
-cp .env.example .env             # IP_HASH_SALT, TUNNEL_TOKEN을 채운다
-docker compose up -d --build
+gcloud run deploy guestbook \
+  --source . \
+  --region asia-southeast1 \
+  --allow-unauthenticated \
+  --set-secrets DATABASE_URL=guestbook-db-url:latest \
+  --set-secrets IP_HASH_SALT=guestbook-ip-salt:latest \
+  --set-secrets TOKEN_SECRET=guestbook-token-secret:latest
 ```
 
-`app`은 host에 포트를 열지 않고 `cloudflared`가 outbound로만 나간다. port forwarding,
-DDNS, 공인 IP가 전부 불필요하고 집 IP도 노출되지 않는다.
+Apple Silicon에서 로컬 빌드해 올릴 때는 `--platform linux/amd64`를 붙인다. `--source`를
+쓰면 Cloud Build가 알아서 맞춰 준다.
 
-Mac이 Apple Silicon이고 파이가 64bit OS면 둘 다 arm64라 Mac에서 빌드해 push하면 그대로 돈다.
+### 2. Vercel
+
+`frontend/`를 root directory로 잡는다. `frontend/vercel.json`의 `REPLACE-ME`를 1번에서
+받은 Cloud Run 주소로 바꾸면 `/api`와 `/media`가 그쪽으로 넘어간다. same-origin이라
+CORS 설정이 아예 필요 없다.
+
+### 시크릿
+
+```bash
+python3 -c 'import secrets; print(secrets.token_hex(32))'
+```
+
+`IP_HASH_SALT`와 `TOKEN_SECRET`을 각각 따로 만들어 Secret Manager에 넣는다.
+`TOKEN_SECRET`은 **instance가 여러 개여도 전부 같은 값**이어야 한다. process마다
+다른 값을 쓰면 verify한 instance와 PATCH를 받는 instance가 갈릴 때 401이 난다.
 
 ## 환경변수
 
 | 이름 | 기본값 | 설명 |
 |---|---|---|
 | `DATABASE_URL` | local 컨테이너 | Postgres 접속 문자열. Neon은 pooled endpoint를 쓴다 |
-| `STATIC_DIR` | `./static` | 프론트 빌드 결과물. 없으면 API만 서빙한다 |
 | `IP_HASH_SALT` | `dev-salt-change-me` | ip_hash용 salt. 배포에서는 반드시 바꾼다 |
+| `TOKEN_SECRET` | `dev-token-secret-change-me` | 임시 토큰 서명용. 모든 instance가 같은 값을 봐야 한다 |
+| `PORT` | `8080` | Cloud Run이 넣어 준다 |
 
 관리자 토큰은 없다. 주인장은 답글, 삭제, 검열을 전부 SQL로 처리한다.
 

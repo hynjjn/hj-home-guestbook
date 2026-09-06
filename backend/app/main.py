@@ -15,7 +15,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, db, security
@@ -47,10 +46,16 @@ def now_iso() -> str:
 
 
 def client_ip(request: Request) -> str | None:
-    # Cloudflare Tunnel 뒤에서는 request.client.host가 전부 같은 값이다.
-    return request.headers.get("CF-Connecting-IP") or (
-        request.client.host if request.client else None
-    )
+    # Cloud Run 뒤에서는 request.client.host가 load balancer다. X-Forwarded-For의
+    # 맨 앞이 원래 client다. Vercel rewrite를 거쳐 와도 Vercel이 앞에 넣어 준다.
+    #
+    # 다만 client가 X-Forwarded-For를 직접 붙여 보내면 그 값이 맨 앞에 남는다.
+    # 즉 이 값은 위조 가능하다. ip_hash는 대충 누가 여러 번 썼는지 보는 용도라
+    # 그 정도로 충분하다고 보고 넘어간다. 차단 근거로는 쓰지 않는다.
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    return request.client.host if request.client else None
 
 
 def serialize(row: dict[str, Any], *, mine: bool, is_owner: bool = False) -> dict[str, Any]:
@@ -91,7 +96,7 @@ def authorize(row: dict[str, Any], given: str | None) -> None:
         raise HTTPException(401, "권한이 없어요")
     if security.token_matches(given, row["edit_token"]):
         return
-    if security.consume_temp_token(given, row["id"]):
+    if security.verify_temp_token(given, row["id"]):
         return
     raise HTTPException(401, "권한이 없어요")
 
@@ -269,11 +274,12 @@ def delete_entry(
     conn.execute(
         "UPDATE entries SET deleted_at = %s WHERE id = %s", (now_iso(), entry_id)
     )
-    security.drop_tokens_for(entry_id)
+    # 임시 토큰을 따로 폐기하지 않는다. 지워진 글은 fetch_alive가 404를 내므로
+    # 살아 있는 토큰을 들고 와도 닿을 곳이 없다.
     return Response(status_code=204)
 
 
-# ---------- 정적 서빙 ----------
+# ---------- 사진 ----------
 
 
 @app.get("/media/{filename}")
@@ -288,6 +294,3 @@ def media(filename: str, conn: Conn) -> Response:
         headers={"Cache-Control": config.PHOTO_CACHE_CONTROL},
     )
 
-
-if config.STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="static")

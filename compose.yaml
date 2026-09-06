@@ -1,24 +1,14 @@
+# local 개발용. 배포는 Cloud Run이 맡으므로 여기에 배포용 서비스는 없다.
 services:
-  app:
-    image: ghcr.io/hynjjn/hj-home-guestbook:latest
-    build:
-      context: .
-    restart: unless-stopped
-    environment:
-      IP_HASH_SALT: ${IP_HASH_SALT:?set IP_HASH_SALT}
-      DATABASE_URL: postgresql://guestbook:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/guestbook
-    depends_on:
-      db:
-        condition: service_healthy
-    # host에 포트를 열지 않는다. cloudflared가 같은 network에서 app:8000으로 붙는다
-
   db:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: guestbook
       POSTGRES_DB: guestbook
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpass}
+    ports:
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,14 +16,22 @@ services:
       interval: 5s
       retries: 10
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
+  # Cloud Run에 올릴 이미지를 로컬에서 그대로 확인하고 싶을 때만 쓴다.
+  #   docker compose --profile image up --build app
+  app:
+    profiles: ["image"]
+    build:
+      context: .
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
+      PORT: 8080
+      DATABASE_URL: postgresql://guestbook:${POSTGRES_PASSWORD:-devpass}@db:5432/guestbook
+      IP_HASH_SALT: ${IP_HASH_SALT:-dev-salt-change-me}
+      TOKEN_SECRET: ${TOKEN_SECRET:-dev-token-secret-change-me}
+    ports:
+      - "8080:8080"
     depends_on:
-      - app
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:
