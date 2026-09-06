@@ -125,7 +125,7 @@ def test_deleted_entries_hidden(client, make_entry):
 
     with db.cursor() as conn:
         row = conn.execute(
-            "SELECT deleted_at FROM entries WHERE id = ?", (made["id"],)
+            "SELECT deleted_at FROM entries WHERE id = %s", (made["id"],)
         ).fetchone()
     assert row["deleted_at"] is not None
 
@@ -181,7 +181,7 @@ def test_failed_attempts_reset_on_success(client, make_entry):
 
     with db.cursor() as conn:
         row = conn.execute(
-            "SELECT failed_attempts, locked_until FROM entries WHERE id = ?", (made["id"],)
+            "SELECT failed_attempts, locked_until FROM entries WHERE id = %s", (made["id"],)
         ).fetchone()
     assert row["failed_attempts"] == 0
     assert row["locked_until"] is None
@@ -191,24 +191,36 @@ def test_failed_attempts_reset_on_success(client, make_entry):
 
 
 def test_photo_exif_stripped(client, make_entry):
-    """GPS가 박힌 사진을 올린 뒤 저장된 파일에 EXIF가 없어야 한다"""
-    made = make_entry(photo=("home.jpg", photo_bytes(), "image/jpeg"))
+    """GPS가 박힌 사진을 올린 뒤 저장된 바이트에 EXIF가 없어야 한다"""
+    make_entry(photo=("home.jpg", photo_bytes(), "image/jpeg"))
 
     entry = client.get("/api/entries").json()["entries"][0]
     assert entry["photo"].startswith("/media/")
+    assert entry["photo"].endswith(".webp")
 
-    saved = config.MEDIA_DIR / entry["photo"].removeprefix("/media/")
-    assert saved.suffix == ".webp"
+    served = client.get(entry["photo"])
+    assert served.headers["content-type"] == "image/webp"
 
-    with Image.open(saved) as img:
+    with Image.open(io.BytesIO(served.content)) as img:
         assert not dict(img.getexif())
         assert max(img.size) <= config.MAX_PHOTO_EDGE
-    del made
 
 
 def test_photo_served(client, make_entry):
     make_entry(photo=("home.jpg", photo_bytes(with_gps=False), "image/jpeg"))
     path = client.get("/api/entries").json()["entries"][0]["photo"]
+    r = client.get(path)
+    assert r.status_code == 200
+    # 사진을 DB에서 꺼내는 이상 브라우저가 매번 다시 받아가면 안 된다.
+    assert "immutable" in r.headers["cache-control"]
+
+
+def test_photo_survives_soft_delete(client, make_entry):
+    """글을 지워도 사진 행은 남는다. 복구할 때 같이 살아나야 한다."""
+    made = make_entry(photo=("home.jpg", photo_bytes(with_gps=False), "image/jpeg"))
+    path = client.get("/api/entries").json()["entries"][0]["photo"]
+
+    client.delete(f"/api/entries/{made['id']}", headers={"X-Edit-Token": made["edit_token"]})
     assert client.get(path).status_code == 200
 
 
@@ -230,8 +242,9 @@ def test_photo_rejects_oversize(client):
     assert r.status_code == 400
 
 
-def test_media_path_traversal(client):
-    assert client.get("/media/..%2Fguestbook.db").status_code in (400, 404)
+def test_media_missing(client):
+    assert client.get("/media/..%2Fguestbook.db").status_code == 404
+    assert client.get("/media/nope.webp").status_code == 404
 
 
 # ---------- 비밀글 ----------
@@ -242,7 +255,7 @@ def test_secret_content_never_leaks(client, make_entry):
     from app import db
 
     with db.cursor() as conn:
-        conn.execute("UPDATE entries SET is_secret = 1 WHERE id = ?", (made["id"],))
+        conn.execute("UPDATE entries SET is_secret = TRUE WHERE id = %s", (made["id"],))
 
     for e in client.get("/api/entries").json()["entries"]:
         if e["is_secret"]:

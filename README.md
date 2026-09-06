@@ -6,13 +6,21 @@
 ## 구성
 
 ```
-backend/    FastAPI + SQLite. 정적 프론트도 여기서 서빙한다
+backend/    FastAPI + Postgres. 정적 프론트도 여기서 서빙한다
 frontend/   React + Vite. 빌드 결과가 backend/static으로 들어간다
 ```
 
 ## 로컬 실행
 
-터미널 두 개를 쓴다.
+Postgres부터 띄운다. 다른 컨테이너와 안 겹치게 5433으로 연다.
+
+```bash
+docker run -d --name guestbook-pg \
+  -e POSTGRES_USER=guestbook -e POSTGRES_DB=guestbook -e POSTGRES_PASSWORD=devpass \
+  -p 5433:5432 postgres:17-alpine
+```
+
+그다음 터미널 두 개를 쓴다. `DATABASE_URL` 기본값이 위 컨테이너를 가리키므로 따로 안 넘겨도 된다.
 
 ```bash
 # 1) API
@@ -54,26 +62,28 @@ Mac이 Apple Silicon이고 파이가 64bit OS면 둘 다 arm64라 Mac에서 빌�
 
 | 이름 | 기본값 | 설명 |
 |---|---|---|
-| `DB_PATH` | `./data/guestbook.db` | SQLite 파일 |
-| `MEDIA_DIR` | `./data/media` | 사진 저장 경로 |
+| `DATABASE_URL` | local 컨테이너 | Postgres 접속 문자열. Neon은 pooled endpoint를 쓴다 |
 | `STATIC_DIR` | `./static` | 프론트 빌드 결과물. 없으면 API만 서빙한다 |
 | `IP_HASH_SALT` | `dev-salt-change-me` | ip_hash용 salt. 배포에서는 반드시 바꾼다 |
 
 관리자 토큰은 없다. 주인장은 답글, 삭제, 검열을 전부 SQL로 처리한다.
 
 ```bash
-sqlite3 data/guestbook.db \
-  "UPDATE entries SET owner_reply = '다음에 보여줄게', owner_reply_at = datetime('now') WHERE id = 187"
+psql "$DATABASE_URL" -c \
+  "UPDATE entries SET owner_reply = '다음에 보여줄게', owner_reply_at = now()::text WHERE id = 187"
 ```
 
 ## 백업
 
+사진 바이트가 `photos` 테이블에 들어 있으므로 dump 하나가 곧 완전한 스냅샷이다.
+DB와 파일 저장소가 서로 어긋난 채로 복구되는 경우가 아예 없다.
+
 ```bash
-sqlite3 /data/guestbook.db ".backup /backup/$(date +%F).db"
-rsync -a /data/media/ /backup/media/
+pg_dump "$DATABASE_URL" -Fc -f "backup-$(date +%F).dump"
 ```
 
-DB만 백업하면 복구했을 때 사진이 전부 깨진 링크가 된다. 사진도 백업 대상이다.
+Neon이 주는 PITR은 Neon 쪽 사고를 막아 줄 뿐이다. 이쪽 실수는 못 막으니 위 dump를
+따로 굴린다.
 
 ## 폰트
 

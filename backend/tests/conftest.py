@@ -1,24 +1,24 @@
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
-_tmp = Path(tempfile.mkdtemp(prefix="guestbook-test-"))
-os.environ["DB_PATH"] = str(_tmp / "guestbook.db")
-os.environ["MEDIA_DIR"] = str(_tmp / "media")
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql://guestbook:devpass@127.0.0.1:5433/guestbook"
+)
 os.environ["IP_HASH_SALT"] = "test-salt"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import config, db  # noqa: E402
+from app import db  # noqa: E402
 from app.main import app  # noqa: E402
 
 
 @pytest.fixture
 def client():
-    if config.DB_PATH.exists():
-        config.DB_PATH.unlink()
+    # 테이블을 지우고 다시 만든다. id가 1부터 다시 시작해야 커서 페이지네이션
+    # 테스트가 앞 테스트의 잔여 행에 걸리지 않는다.
+    with db.cursor() as conn:
+        conn.execute("DROP TABLE IF EXISTS entries, photos")
     db.init()
     with TestClient(app) as c:
         yield c

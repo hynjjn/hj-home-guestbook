@@ -6,10 +6,25 @@ services:
     restart: unless-stopped
     environment:
       IP_HASH_SALT: ${IP_HASH_SALT:?set IP_HASH_SALT}
-    volumes:
-      # SD 카드가 아니라 USB SSD 위의 경로를 잡는다
-      - ${DATA_DIR:-./data}:/data
+      DATABASE_URL: postgresql://guestbook:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/guestbook
+    depends_on:
+      db:
+        condition: service_healthy
     # host에 포트를 열지 않는다. cloudflared가 같은 network에서 app:8000으로 붙는다
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guestbook
+      POSTGRES_DB: guestbook
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guestbook"]
+      interval: 5s
+      retries: 10
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -19,3 +34,6 @@ services:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
     depends_on:
       - app
+
+volumes:
+  pgdata:

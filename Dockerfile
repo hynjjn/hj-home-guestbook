@@ -24,15 +24,13 @@ FROM python:3.14-slim-bookworm
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    DB_PATH=/data/guestbook.db \
-    MEDIA_DIR=/data/media \
     STATIC_DIR=/app/static
 
 COPY --from=deps /app/.venv /app/.venv
 COPY backend/app ./app
 COPY --from=web /web/dist ./static
 
-RUN useradd --create-home --uid 10001 app && mkdir -p /data && chown -R app /data
+RUN useradd --create-home --uid 10001 app
 USER app
 
 EXPOSE 8000
