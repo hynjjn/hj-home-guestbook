@@ -1,10 +1,12 @@
 import importlib
 import io
+
+import psycopg
 from unittest import mock
 
 from PIL import Image
 
-from app import config, security
+from app import config, db, security
 
 
 def photo_bytes(*, with_gps=True) -> bytes:
@@ -322,3 +324,27 @@ def test_secret_content_never_leaks(client, make_entry):
         if e["is_secret"]:
             assert "content" not in e
             assert "reply" not in e
+
+
+# ---------- connection pool ----------
+
+
+def test_pool_survives_server_side_disconnect(client, make_entry):
+    """서버가 끊어 버린 연결을 pool이 그대로 내주면 안 된다.
+
+    Cloud Run instance가 idle하면 CPU가 얼어서 pool의 정리 작업이 안 돈다.
+    그 사이 Neon pooler는 idle 연결을 끊는다. 깨어나서 첫 요청이 죽은 연결을
+    받으면 그대로 500이 난다. 실제로 배포 직후 이 증상이 나왔다.
+    """
+    make_entry(content="살아남아야 한다")
+
+    with db.cursor() as conn:
+        pid = conn.execute("SELECT pg_backend_pid() AS p").fetchone()["p"]
+
+    # 반납된 연결을 바깥에서 끊는다
+    with psycopg.connect(config.DATABASE_URL, autocommit=True) as killer:
+        killer.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+    r = client.get("/api/entries")
+    assert r.status_code == 200, f"죽은 연결을 내줬다: {r.status_code}"
+    assert r.json()["total"] == 1

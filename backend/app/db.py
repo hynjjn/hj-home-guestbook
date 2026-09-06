@@ -60,6 +60,15 @@ def pool() -> ConnectionPool:
             # commit하지 않으므로 pool에 반납될 때 전부 rollback된다. sqlite3에
             # isolation_level=None을 주던 것과 같은 자리다.
             kwargs={"autocommit": True, "row_factory": dict_row},
+            # 내주기 전에 연결이 살아 있는지 확인하고, 죽었으면 조용히 새로 만든다.
+            #
+            # 없으면 idle 뒤 첫 요청이 500으로 떨어진다. Cloud Run은 instance가
+            # idle하면 CPU를 얼려서 pool의 정리 작업이 안 돌고, 그동안 Neon
+            # pooler는 idle 연결을 끊는다. 깨어나면 pool은 이미 끊긴 연결을
+            # 멀쩡한 줄 알고 들고 있다.
+            #
+            # 요청마다 왕복이 한 번 늘지만 같은 region이라 1~3ms다.
+            check=ConnectionPool.check_connection,
             open=True,
         )
     return _pool
