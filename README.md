@@ -62,9 +62,10 @@ Apple Silicon에서 로컬 빌드해 올릴 때는 `--platform linux/amd64`를 �
 
 ### 2. Vercel
 
-`frontend/`를 root directory로 잡는다. `frontend/vercel.json`의 `REPLACE-ME`를 1번에서
-받은 Cloud Run 주소로 바꾸면 `/api`와 `/media`가 그쪽으로 넘어간다. same-origin이라
-CORS 설정이 아예 필요 없다.
+`frontend/`를 root directory로 잡는다. `frontend/vercel.json`이 `/api`와 `/media`를
+Cloud Run으로 넘긴다. 브라우저에서는 전부 same-origin이라 CORS 설정이 아예 필요 없다.
+
+서비스를 새로 만들면 `vercel.json`의 destination도 같이 바꾼다.
 
 ### 시크릿
 
@@ -75,6 +76,24 @@ python3 -c 'import secrets; print(secrets.token_hex(32))'
 `IP_HASH_SALT`와 `TOKEN_SECRET`을 각각 따로 만들어 Secret Manager에 넣는다.
 `TOKEN_SECRET`은 **instance가 여러 개여도 전부 같은 값**이어야 한다. process마다
 다른 값을 쓰면 verify한 instance와 PATCH를 받는 instance가 갈릴 때 401이 난다.
+
+### 배포된 곳
+
+| | |
+|---|---|
+| GCP project | `hj-home-guestbook` |
+| Cloud Run | `guestbook` (asia-southeast1) |
+| API | https://guestbook-417017218350.asia-southeast1.run.app |
+| Neon | ap-southeast-1 (Singapore) |
+
+secret은 Secret Manager의 `guestbook-db-url`, `guestbook-ip-salt`, `guestbook-token-secret`이다.
+Cloud Run은 `guestbook-run` service account로 돌고, 이 계정은 저 secret 3개를 읽는 권한만 갖는다.
+
+`gcloud`가 Python 3.9를 잡아 실패하면 아래를 shell 설정에 넣는다.
+
+```bash
+export CLOUDSDK_PYTHON=/opt/homebrew/bin/python3.14
+```
 
 ## 환경변수
 
