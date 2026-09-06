@@ -98,15 +98,6 @@ body {
   border-bottom: 2px dashed #dcdcdc;
 }
 
-.seq {
-  font-size: 12px;
-  color: #fff;
-  background: var(--sky-deep);
-  border: 1.5px solid var(--line);
-  padding: 3px 5px 2px;
-  flex-shrink: 0;
-}
-
 .avatar {
   width: 24px; height: 24px;
   border: 1.5px solid var(--line);

@@ -38,7 +38,10 @@ export function EntryCard({
       setMode("edit");
       return;
     }
-    if (!confirm(`NO.${entry.id} 글을 지울까요?\n되돌릴 수 없습니다.`)) {
+    // 비밀글은 content가 응답에 없다. 그때는 그냥 "이 글"로 부른다.
+    const head = (entry.content ?? "").trim();
+    const label = head ? `"${head.length > 16 ? head.slice(0, 16) + "…" : head}"` : "이";
+    if (!confirm(`${label} 글을 지울까요?\n되돌릴 수 없습니다.`)) {
       close();
       return;
     }
@@ -104,7 +107,6 @@ export function EntryCard({
   return (
     <article className="entry">
       <div className="entry-head">
-        <span className="seq">NO.{entry.id}</span>
         <Avatar seed={entry.name + entry.id} label={entry.name} />
         <span className="who">{entry.name}</span>
         <span className="when">
