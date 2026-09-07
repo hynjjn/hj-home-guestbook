@@ -16,17 +16,17 @@ CREATE TABLE IF NOT EXISTS entries (
     pin_hash        TEXT    NOT NULL,
     edit_token      TEXT    NOT NULL,
     failed_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until    TEXT,
+    locked_until    TIMESTAMPTZ,
 
     is_secret       BOOLEAN NOT NULL DEFAULT FALSE,
     photo           TEXT,
     owner_reply     TEXT,
-    owner_reply_at  TEXT,
+    owner_reply_at  TIMESTAMPTZ,
 
     ip_hash         TEXT,
-    created_at      TEXT    NOT NULL,
-    updated_at      TEXT,
-    deleted_at      TEXT
+    created_at      TIMESTAMPTZ NOT NULL,
+    updated_at      TIMESTAMPTZ,
+    deleted_at      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_feed ON entries (deleted_at, id DESC);
@@ -42,6 +42,33 @@ CREATE TABLE IF NOT EXISTS photos (
 
 # WEBP는 이미 압축되어 있다. TOAST가 다시 압축을 시도해봐야 얻는 게 없다.
 PHOTO_STORAGE = "ALTER TABLE photos ALTER COLUMN data SET STORAGE EXTERNAL"
+
+# SQLite 시절에는 시각을 ISO 문자열 TEXT로 두었고, Postgres로 옮기면서 그대로
+# 딸려 왔다. CREATE TABLE IF NOT EXISTS는 이미 있는 테이블을 고치지 않으므로
+# 살아 있는 DB는 여기서 바꾼다. 아직 TEXT인 컬럼만 골라 바꾸니 몇 번 돌아도 같다.
+# 기존 값은 전부 ISO 8601이라 ::timestamptz로 바로 읽힌다.
+TIME_COLUMNS = ("locked_until", "owner_reply_at", "created_at", "updated_at", "deleted_at")
+TEXT_TO_TIMESTAMPTZ = """
+DO $$
+DECLARE
+    col text;
+BEGIN
+    FOREACH col IN ARRAY ARRAY[{columns}] LOOP
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'entries'
+              AND column_name = col
+              AND data_type = 'text'
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE entries ALTER COLUMN %I TYPE timestamptz USING %I::timestamptz',
+                col, col
+            );
+        END IF;
+    END LOOP;
+END $$
+""".format(columns=", ".join(f"'{c}'" for c in TIME_COLUMNS))
 
 _pool: ConnectionPool | None = None
 
@@ -91,6 +118,7 @@ def init() -> None:
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('guestbook-schema'))")
         conn.execute(SCHEMA)
         conn.execute(PHOTO_STORAGE)
+        conn.execute(TEXT_TO_TIMESTAMPTZ)
 
 
 def close() -> None:
