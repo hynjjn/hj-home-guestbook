@@ -41,8 +41,16 @@ def get_conn():
 Conn = Annotated[psycopg.Connection, Depends(get_conn)]
 
 
-def now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+def to_iso(value: datetime | None) -> str | None:
+    """timestamptz는 aware datetime으로 돌아온다. 응답 형식은 TEXT 시절과 같은
+    초 단위 Z 표기를 유지한다. 프론트와 기존 소비자가 보는 모양을 바꾸지 않는다."""
+    if value is None:
+        return None
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def client_ip(request: Request) -> str | None:
@@ -66,12 +74,12 @@ def serialize(row: dict[str, Any], *, mine: bool, is_owner: bool = False) -> dic
         "is_secret": bool(row["is_secret"]),
         "photo": f"/media/{row['photo']}" if row["photo"] else None,
         "reply": (
-            {"content": row["owner_reply"], "at": row["owner_reply_at"]}
+            {"content": row["owner_reply"], "at": to_iso(row["owner_reply_at"])}
             if row["owner_reply"]
             else None
         ),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": to_iso(row["created_at"]),
+        "updated_at": to_iso(row["updated_at"]),
         "mine": mine,
     }
     # 비밀글은 프론트에서 가리는 게 아니라 서버가 키 자체를 응답에 담지 않는다.
@@ -190,7 +198,7 @@ async def create_entry(
                 token,
                 filename,
                 security.hash_ip(client_ip(request)),
-                now_iso(),
+                now(),
             ),
         ).fetchone()
     # edit_token은 이 응답에서만 내려간다.
@@ -209,17 +217,17 @@ def verify_pin(entry_id: int, body: VerifyBody, conn: Conn) -> dict[str, str]:
     row = fetch_alive(conn, entry_id)
 
     locked_until = row["locked_until"]
-    if locked_until and datetime.fromisoformat(locked_until) > datetime.now(UTC):
+    if locked_until and locked_until > now():
         # 잠긴 동안에는 PIN이 맞아도 통과시키지 않는다.
         raise HTTPException(423, "잠시 뒤에 다시 시도해 주세요")
 
     if not security.check_pin(body.pin, row["pin_hash"]):
         attempts = row["failed_attempts"] + 1
         if attempts >= config.PIN_MAX_ATTEMPTS:
-            until = datetime.now(UTC) + timedelta(seconds=config.PIN_LOCK_SECONDS)
+            until = now() + timedelta(seconds=config.PIN_LOCK_SECONDS)
             conn.execute(
                 "UPDATE entries SET failed_attempts = 0, locked_until = %s WHERE id = %s",
-                (until.isoformat(), entry_id),
+                (until, entry_id),
             )
         else:
             conn.execute(
@@ -258,7 +266,7 @@ def update_entry(
 
     conn.execute(
         "UPDATE entries SET content = %s, updated_at = %s WHERE id = %s",
-        (content, now_iso(), entry_id),
+        (content, now(), entry_id),
     )
     updated = fetch_alive(conn, entry_id)
     return serialize(updated, mine=True)
@@ -274,7 +282,7 @@ def delete_entry(
     authorize(row, x_edit_token)
     # soft delete. 사진 파일은 남긴다. 복구할 때 같이 살아나야 한다.
     conn.execute(
-        "UPDATE entries SET deleted_at = %s WHERE id = %s", (now_iso(), entry_id)
+        "UPDATE entries SET deleted_at = %s WHERE id = %s", (now(), entry_id)
     )
     # 임시 토큰을 따로 폐기하지 않는다. 지워진 글은 fetch_alive가 404를 내므로
     # 살아 있는 토큰을 들고 와도 닿을 곳이 없다.

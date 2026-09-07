@@ -350,3 +350,49 @@ def test_pool_survives_server_side_disconnect(client, make_entry):
     r = client.get("/api/entries")
     assert r.status_code == 200, f"죽은 연결을 내줬다: {r.status_code}"
     assert r.json()["total"] == 1
+
+
+# ---------- 스키마 이관 ----------
+
+
+def test_text_time_columns_become_timestamptz(client):
+    """SQLite 시절 TEXT 시각 컬럼을 가진 DB에서 init()이 돌면 timestamptz로 바뀌고,
+    기존 값(Z 표기와 +00:00 표기 모두)은 그대로 읽힌다. 두 번 돌아도 같다."""
+    legacy = db.SCHEMA
+    for col in db.TIME_COLUMNS:
+        legacy = legacy.replace(f"{col:<15} TIMESTAMPTZ", f"{col:<15} TEXT")
+    assert "TIMESTAMPTZ" not in legacy
+
+    with db.cursor() as conn:
+        conn.execute("DROP TABLE IF EXISTS entries, photos")
+        conn.execute(legacy)
+        conn.execute(
+            """INSERT INTO entries
+               (name, content, pin_hash, edit_token, locked_until,
+                owner_reply, owner_reply_at, created_at, updated_at)
+               VALUES ('a', 'b', 'h', 't1', '2099-01-01T00:00:00+00:00',
+                       'r', '2026-09-06T01:02:03Z', '2026-09-05T12:34:56Z', '2026-09-06T00:00:00Z')"""
+        )
+
+    db.init()
+    db.init()
+
+    with db.cursor() as conn:
+        types = {
+            r["column_name"]: r["data_type"]
+            for r in conn.execute(
+                """SELECT column_name, data_type FROM information_schema.columns
+                   WHERE table_name = 'entries' AND column_name = ANY(%s)""",
+                (list(db.TIME_COLUMNS),),
+            )
+        }
+    assert set(types) == set(db.TIME_COLUMNS)
+    assert set(types.values()) == {"timestamp with time zone"}
+
+    entry = client.get("/api/entries").json()["entries"][0]
+    assert entry["created_at"] == "2026-09-05T12:34:56Z"
+    assert entry["updated_at"] == "2026-09-06T00:00:00Z"
+    assert entry["reply"] == {"content": "r", "at": "2026-09-06T01:02:03Z"}
+    # +00:00 표기로 저장된 locked_until도 비교에 쓰인다.
+    r = client.post("/api/entries/1/verify", json={"pin": "1234"})
+    assert r.status_code == 423
